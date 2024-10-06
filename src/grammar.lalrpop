@@ -1,0 +1,122 @@
+use crate::ast::*;
+use crate::lexer::*;
+
+grammar;
+
+pub Prog: Program = {
+    nl* <functions:Func*> => Program { functions }
+}
+
+Func: Function = {
+    "fun" <name:ident> "(" <params:CommaList<Param>> ")" <ret: (":" <TyExpr>)?> "{" <b:Block> "}" nl* => {
+        Function {
+            name,
+            params,
+            return_type: ret.unwrap_or(Ty::Any),
+            body: b,
+        }
+    }
+}
+
+Param: (String, Ty) = {
+    <name:ident> ":" <ty:TyExpr> => (name, ty),
+    <name:ident> => (name, Ty::Any)
+}
+
+TyName: Ty = {
+    "int" => Ty::Int,
+    "void" => Ty::Void,
+    "any" => Ty::Any,
+    "(" <TyExpr> ")"
+}
+
+TyExpr: Ty = {
+    "fun" "(" <params:CommaList<TyName>> ")" <ret:("->" <TyName>)?> => Ty::Func(Box::new(ret.unwrap_or(Ty::Void)), params.into()),
+    TyName
+}
+
+Block: Vec<Statement> = {
+    nl* <stmts: (<Stmt> nl+)*> <s:Stmt> nl* => {
+        let mut stmts = stmts;
+        stmts.push(s);
+        stmts
+    }
+}
+
+Stmt: Statement = {
+    "return" <e:Expr> => Statement::Return(e),
+    "let" <name:ident> "=" <e:Expr> => Statement::Let(name, e),
+    <var:ident> "=" <e:Expr> => Statement::Assign(var, e),
+    <e:Expr> => Statement::ExprStmt(e)
+}
+
+Expr: Expr = {
+    BinOpL<Factor, AddOp>
+};
+
+Factor: Expr = {
+    BinOpL<Call, MulOp>
+}
+
+Call: Expr = {
+    <a:Atom> "(" <args:CommaList<Expr>> ")" => ExprKind::Call(Box::new(a), args).expr(),
+    <a:Atom> => a,
+};
+
+Atom: Expr = {
+    <v:ident> => ExprKind::Var(v).expr(),
+    <n:int> => ExprKind::IntLiteral(n).expr(),
+    "(" <e:Expr> ")" => e,
+};
+
+AddOp: BinOp = {
+    "+" => BinOp::Add,
+    "-" => BinOp::Sub,
+};
+
+MulOp: BinOp = {
+    "*" => BinOp::Mul,
+}
+
+CommaList<T>: Vec<T> = {
+    <v:(<T> ",")+> <e:T> => {
+        let mut v = v;
+        v.push(e);
+        v
+    },
+    <e:T> => vec![e],
+    => vec![],
+};
+
+BinOpL<T, O>: Expr = {
+    <lhs:BinOpL<T, O>> <op:O> <rhs:T> => ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)).expr(),
+    <e:T> => e,
+}
+
+extern {
+    type Location = usize;
+    type Error = LexerError;
+
+    enum Token {
+        ident => Token::Ident(<String>),
+        int => Token::Int(<i64>),
+        nl => Token::Nl,
+        "fun" => Token::KwFun,
+        "return" => Token::KwReturn,
+        "let" => Token::KwLet,
+        "int" => Token::KwInt,
+        "void" => Token::KwVoid,
+        "any" => Token::KwAny,
+        "(" => Token::LParen,
+        ")" => Token::RParen,
+        "{" => Token::LBrace,
+        "}" => Token::RBrace,
+        ":" => Token::Colon,
+        "," => Token::Comma,
+        "=" => Token::Eq,
+        "+" => Token::Plus,
+        "-" => Token::Minus,
+        "*" => Token::Star,
+        "->" => Token::Arrow,
+    }
+}

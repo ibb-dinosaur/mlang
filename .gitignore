@@ -1,0 +1,8 @@
+/target
+mir/*
+*.o
+*.a
+wrapper.h
+src/gccjit.rs
+src/mir.rs
+src/parser.rs

@@ -21,6 +21,8 @@ pub enum Token {
     KwInt,
     #[token("void")]
     KwVoid,
+    #[token("bool")]
+    KwBool,
     #[token("any")]
     KwAny,
     #[token("(")]
@@ -36,7 +38,7 @@ pub enum Token {
     #[token(",")]
     Comma,
     #[token("=")]
-    Eq,
+    Assign,
     #[token("+")]
     Plus,
     #[token("-")]
@@ -45,6 +47,18 @@ pub enum Token {
     Star,
     #[token("->")]
     Arrow,
+    #[token("<")]
+    Lt,
+    #[token(">")]
+    Gt,
+    #[token("<=")]
+    Le,
+    #[token(">=")]
+    Ge,
+    #[token("==")]
+    Eq,
+    #[token("!=")]
+    Ne,
 }
 
 pub type Spanned<Tok, Loc, Error> = Result<(Loc, Tok, Loc), Error>;

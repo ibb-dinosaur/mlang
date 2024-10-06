@@ -3,6 +3,7 @@ pub enum Ty {
     Unk,
     Int,
     Void,
+    Bool,
     Any,
     Func(Box<Ty>, Box<[Ty]>),
     #[allow(clippy::enum_variant_names)]
@@ -17,7 +18,7 @@ impl Ty {
 
     /// Simple types are: not type variables, not compound types
     pub fn is_simple(&self) -> bool {
-        matches!(self, Ty::Int | Ty::Void | Ty::Any)
+        matches!(self, Ty::Int | Ty::Void | Ty::Bool | Ty::Any)
     }
 
     pub fn is_func(&self) -> bool {
@@ -57,6 +58,26 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    CmpEq,
+    CmpNe,
+    CmpLt,
+    CmpLe,
+    CmpGt,
+    CmpGe,
+}
+
+impl BinOp {
+    pub fn is_arithmetic(&self) -> bool {
+        matches!(self, BinOp::Add | BinOp::Sub | BinOp::Mul)
+    }
+
+    pub fn is_eq_comparison(&self) -> bool {
+        matches!(self, BinOp::CmpEq | BinOp::CmpNe)
+    }
+
+    pub fn is_ord_comparison(&self) -> bool {
+        matches!(self, BinOp::CmpLt | BinOp::CmpLe | BinOp::CmpGt | BinOp::CmpGe)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -97,6 +118,12 @@ impl std::fmt::Display for BinOp {
             BinOp::Add => "+",
             BinOp::Sub => "-",
             BinOp::Mul => "*",
+            BinOp::CmpEq => "==",
+            BinOp::CmpNe => "!=",
+            BinOp::CmpLt => "<",
+            BinOp::CmpLe => "<=",
+            BinOp::CmpGt => ">",
+            BinOp::CmpGe => ">=",
         })
     }
 }
@@ -107,6 +134,7 @@ impl std::fmt::Display for Ty {
             Ty::Unk => write!(f, "unknown"),
             Ty::Int => write!(f, "int"),
             Ty::Void => write!(f, "void"),
+            Ty::Bool => write!(f, "bool"),
             Ty::Any => write!(f, "any"),
             Ty::TyVar(i) => write!(f, "tv${}", i),
             Ty::Func(ret, params) => {

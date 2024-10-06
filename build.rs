@@ -38,13 +38,13 @@ fn main() {
     lalrpop::process_src().unwrap();
 
     // llvm-extras
-    println!("cargo:rerun-if-changed=llvm-extras.cpp");
+    /*println!("cargo:rerun-if-changed=llvm-extras.cpp");
     cc::Build::new()
         .cpp(true)
         .file("llvm-extras.cpp")
         .include("/usr/include/llvm-18")
         .include("/usr/include/llvm-c-18")
-        .compile("llvm-extras");
+        .compile("llvm-extras");*/
 
     println!("cargo:rustc-link-search=.");
     println!("cargo:rustc-link-lib=static=llvm-extras");

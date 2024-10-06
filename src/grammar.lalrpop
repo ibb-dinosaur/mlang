@@ -26,6 +26,7 @@ Param: (String, Ty) = {
 TyName: Ty = {
     "int" => Ty::Int,
     "void" => Ty::Void,
+    "bool" => Ty::Bool,
     "any" => Ty::Any,
     "(" <TyExpr> ")"
 }
@@ -51,8 +52,17 @@ Stmt: Statement = {
 }
 
 Expr: Expr = {
-    BinOpL<Factor, AddOp>
+    CmpExpr
 };
+
+CmpExpr: Expr = {
+    <lhs:AddExpr> <op:CmpOp> <rhs:AddExpr> => ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)).expr(),
+    AddExpr
+}
+
+AddExpr: Expr = {
+    BinOpL<Factor, AddOp>
+}
 
 Factor: Expr = {
     BinOpL<Call, MulOp>
@@ -68,6 +78,15 @@ Atom: Expr = {
     <n:int> => ExprKind::IntLiteral(n).expr(),
     "(" <e:Expr> ")" => e,
 };
+
+CmpOp: BinOp = {
+    "==" => BinOp::CmpEq,
+    "!=" => BinOp::CmpNe,
+    "<" => BinOp::CmpLt,
+    "<=" => BinOp::CmpLe,
+    ">" => BinOp::CmpGt,
+    ">=" => BinOp::CmpGe,
+}
 
 AddOp: BinOp = {
     "+" => BinOp::Add,
@@ -107,16 +126,23 @@ extern {
         "int" => Token::KwInt,
         "void" => Token::KwVoid,
         "any" => Token::KwAny,
+        "bool" => Token::KwBool,
         "(" => Token::LParen,
         ")" => Token::RParen,
         "{" => Token::LBrace,
         "}" => Token::RBrace,
         ":" => Token::Colon,
         "," => Token::Comma,
-        "=" => Token::Eq,
+        "=" => Token::Assign,
         "+" => Token::Plus,
         "-" => Token::Minus,
         "*" => Token::Star,
         "->" => Token::Arrow,
+        "==" => Token::Eq,
+        "!=" => Token::Ne,
+        "<" => Token::Lt,
+        "<=" => Token::Le,
+        ">" => Token::Gt,
+        ">=" => Token::Ge,
     }
 }

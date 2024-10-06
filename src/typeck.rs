@@ -92,10 +92,10 @@ impl InferenceContext {
 
     fn most_general_type(&self, a: Ty, b: Ty) -> Ty {
         assert!(!a.is_var() && !b.is_var());
-        match (a, b) {
-            (Ty::Int, Ty::Int) => Ty::Int,
-            (Ty::Void, Ty::Void) => Ty::Void,
-            _ => Ty::Any,
+        if a == b {
+            a
+        } else {
+            Ty::Any
         }
     }
 
@@ -227,13 +227,15 @@ impl TypeChecker {
             ExprKind::BinOp(op, lhs, rhs) => {
                 self.check_expr(lhs);
                 self.check_expr(rhs);
-                match op {
-                    BinOp::Add | BinOp::Sub | BinOp::Mul => {
-                        self.ctx.add_pair(lhs.ty.clone(), Ty::Int);
-                        self.ctx.add_pair(rhs.ty.clone(), Ty::Int);
-                        *expr_type = Ty::Int
-                    }
-                }
+                if op.is_arithmetic() || op.is_ord_comparison() { // (int, int) -> int
+                    self.ctx.add_pair(lhs.ty.clone(), Ty::Int);
+                    self.ctx.add_pair(rhs.ty.clone(), Ty::Int);
+                    *expr_type = Ty::Int
+                } else if op.is_eq_comparison() { // (T, T) -> bool (have to be the same type)
+                    self.ctx.add_pair(lhs.ty.clone(), rhs.ty.clone());
+                    self.ctx.add_pair(rhs.ty.clone(), lhs.ty.clone());
+                    *expr_type = Ty::Bool;
+                } else { unreachable!() }
             },
             ExprKind::TypeCast(_, _) => unreachable!(), // generated only after this phase
             ExprKind::Call(callee, args) => {
@@ -275,7 +277,7 @@ impl TypeChecker {
             Statement::Let(name, expr) | 
             Statement::Assign(name, expr) => {
                 self.resolve_expr(expr);
-                let var_ty = self.get_resolved(&self.vars[&*name]);;
+                let var_ty = self.get_resolved(&self.vars[&*name]);
                 insert_cast(expr, var_ty);
             }
         }
@@ -291,12 +293,18 @@ impl TypeChecker {
                 *expr_type = var_type; // actual type of the variable value
                 insert_cast(expr, expected_type);
             },
-            ExprKind::BinOp(_, lhs, rhs) => {
+            ExprKind::BinOp(op, lhs, rhs) => {
                 self.resolve_expr(lhs);
                 self.resolve_expr(rhs);
-                insert_cast(lhs, Ty::Int);
-                insert_cast(rhs, Ty::Int);
-                *expr_type = Ty::Int;
+                if op.is_arithmetic() || op.is_ord_comparison() {
+                    insert_cast(lhs, Ty::Int);
+                    insert_cast(rhs, Ty::Int);
+                    *expr_type = Ty::Int;
+                } else if op.is_eq_comparison() {
+                    let lhs_type = self.get_resolved(&lhs.ty);
+                    insert_cast(rhs, lhs_type);
+                    *expr_type = Ty::Bool;
+                } else { unreachable!() }
                 let expected_type = self.get_resolved(expr_type);
                 insert_cast(expr, expected_type);
             },

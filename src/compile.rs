@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use inkwell::{attributes::{Attribute, AttributeLoc}, basic_block::BasicBlock, builder::Builder, context::Context, intrinsics::Intrinsic, llvm_sys::LLVMAttributeFunctionIndex, module::Module, types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType, StructType, VoidType}, values::{AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue}, AddressSpace};
+use inkwell::{attributes::{Attribute, AttributeLoc}, basic_block::BasicBlock, builder::Builder, context::Context, intrinsics::Intrinsic, llvm_sys::LLVMAttributeFunctionIndex, module::Module, types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType, StructType, VoidType}, values::{AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue}, AddressSpace, IntPredicate};
 
 use crate::ast::*;
 
@@ -20,11 +20,13 @@ pub struct PrimTypes<'a> {
     int: IntType<'a>,
     c_void: VoidType<'a>,
     any: StructType<'a>,
-    ptr: PointerType<'a>
+    ptr: PointerType<'a>,
+    bool: IntType<'a>,
 }
 
 pub struct Builtins<'a> {
     type_cast_fail_fn: FunctionValue<'a>,
+    cmp_any_fn: FunctionValue<'a>,
 }
 
 impl<'a> Compiler<'a> {
@@ -35,6 +37,7 @@ impl<'a> Compiler<'a> {
         let int = ctx.i64_type();
         let c_void = ctx.void_type();
         let ptr = ctx.ptr_type(AddressSpace::default());
+        let bool = ctx.custom_width_int_type(1);
         let any = ctx.struct_type(&[int.into(), int.into()], false);
         // initialize builtins
         let t1 = c_void.fn_type(&[int.into(), int.into(), int.into()], false);
@@ -42,7 +45,9 @@ impl<'a> Compiler<'a> {
         type_cast_fail_fn.add_attribute(AttributeLoc::Function, ctx.create_enum_attribute(5, 0)); // cold
         type_cast_fail_fn.add_attribute(AttributeLoc::Function, ctx.create_enum_attribute(33, 0)); // noreturn
         type_cast_fail_fn.add_attribute(AttributeLoc::Function, ctx.create_enum_attribute(38, 0)); // nounwind
-        Self { ctx, m, b, tys: PrimTypes { int, c_void, any, ptr }, builtins: Builtins { type_cast_fail_fn }, globals: HashMap::new(), locals: HashMap::new(), obj_type_tags: BTreeMap::new() }
+        let cmp_any_fn = m.add_function("__cmp_any", bool.fn_type(&[any.into(), any.into()], false), None);
+        cmp_any_fn.add_attribute(AttributeLoc::Function, ctx.create_enum_attribute(38, 0)); // nounwind
+        Self { ctx, m, b, tys: PrimTypes { int, c_void, any, ptr, bool }, builtins: Builtins { type_cast_fail_fn, cmp_any_fn }, globals: HashMap::new(), locals: HashMap::new(), obj_type_tags: BTreeMap::new() }
     }
 
     pub fn emit_program(&mut self, p: &Program) {
@@ -135,12 +140,29 @@ impl<'a> Compiler<'a> {
                 }
             },
             ExprKind::BinOp(op, lhs, rhs) => {
-                let lhs = self.emit_expr(lhs).into_int_value();
-                let rhs = self.emit_expr(rhs).into_int_value();
-                match op {
-                    BinOp::Add => self.b.build_int_add(lhs, rhs, "").unwrap().into(),
-                    BinOp::Sub => self.b.build_int_sub(lhs, rhs, "").unwrap().into(),
-                    BinOp::Mul => self.b.build_int_mul(lhs, rhs, "").unwrap().into(),
+                if op.is_eq_comparison() {
+                    let lhs_v = self.emit_expr(lhs);
+                    let rhs_v = self.emit_expr(rhs);
+                    let cmp = self.build_eq_comparison(&lhs.ty, lhs_v, rhs_v);
+                    if *op == BinOp::CmpNe {
+                        // not
+                        self.b.build_int_compare(IntPredicate::EQ, cmp, self.tys.bool.const_zero(), "").unwrap()
+                    } else {
+                        cmp
+                    }.into()
+                } else {
+                    let lhs = self.emit_expr(lhs).into_int_value();
+                    let rhs = self.emit_expr(rhs).into_int_value();
+                    match op {
+                        BinOp::Add => self.b.build_int_add(lhs, rhs, "").unwrap().into(),
+                        BinOp::Sub => self.b.build_int_sub(lhs, rhs, "").unwrap().into(),
+                        BinOp::Mul => self.b.build_int_mul(lhs, rhs, "").unwrap().into(),
+                        BinOp::CmpLt => self.b.build_int_compare(IntPredicate::SLT, lhs, rhs, "").unwrap().into(),
+                        BinOp::CmpGt => self.b.build_int_compare(IntPredicate::SGT, lhs, rhs, "").unwrap().into(),
+                        BinOp::CmpLe => self.b.build_int_compare(IntPredicate::SLE, lhs, rhs, "").unwrap().into(),
+                        BinOp::CmpGe => self.b.build_int_compare(IntPredicate::SGE, lhs, rhs, "").unwrap().into(),
+                        _ => unreachable!()
+                    }
                 }
             },
             ExprKind::TypeCast(type_cast_kind, expr) => {
@@ -148,11 +170,7 @@ impl<'a> Compiler<'a> {
                 match type_cast_kind {
                     TypeCastKind::ToAny => {
                         let type_tag = any_tag_of_type(&expr.ty);
-                        let payload = if val.is_int_value() {
-                            val.into_int_value()
-                        } else if val.is_pointer_value() {
-                            self.b.build_ptr_to_int(val.into_pointer_value(), self.tys.int, "").unwrap()
-                        } else { panic!() };
+                        let payload = self.convert_val_to_any_payload(val, &expr.ty);
                         // the struct has to be a constant, so we use undef in the second field
                         // and then insert (at runtime) the actual value
                         let any_val = self.tys.any.const_named_struct(&[
@@ -176,7 +194,7 @@ impl<'a> Compiler<'a> {
                         self.build_typecast_fail(type_tag, any_val_tag, any_val_payload);
                         // success branch
                         self.b.position_at_end(success_branch);
-                        self.b.build_bit_cast(any_val_payload, self.lower_ty(&e.ty), "").unwrap() // TODO: fix this bitcast
+                        self.convert_any_payload_to_type(any_val_payload.into_int_value(), &e.ty)
                     },
                     TypeCastKind::FromAnyToFunc => todo!()
                 }
@@ -217,6 +235,7 @@ impl<'a> Compiler<'a> {
         match ty {
             Ty::Int => self.tys.int.into(),
             Ty::Void => self.tys.int.into(),
+            Ty::Bool => self.tys.bool.into(),
             Ty::Any => self.tys.any.into(),
             Ty::Func(_, _) => self.tys.ptr.into(),
             Ty::Unk | Ty::TyVar(_) => unreachable!(),
@@ -226,6 +245,7 @@ impl<'a> Compiler<'a> {
     fn get_type_tag(&mut self, ty: &Ty) -> IntValue<'a> {
         match ty {
             Ty::Int => self.tys.int.const_int(1, false),
+            Ty::Bool => self.tys.int.const_int(2, false),
             Ty::Void => self.tys.int.const_int(7, false),
             Ty::Any => self.tys.int.const_int(14, false),
             Ty::Func(_, _) => {
@@ -255,12 +275,55 @@ impl<'a> Compiler<'a> {
         g.set_unnamed_addr(true); // allow LLVM to merge identical globals
         g.as_pointer_value().const_to_int(self.tys.int)
     }
+
+    /// Convert a value to an i64 payload for the `any` type
+    fn convert_val_to_any_payload(&mut self, val: BasicValueEnum<'a>, val_ty: &Ty) -> IntValue<'a> {
+        match val_ty {
+            Ty::Int => val.into_int_value(), // already i64
+            Ty::Void => val.into_int_value(), // already i64
+            Ty::Bool => // i1 -> i64
+                self.b.build_int_z_extend(val.into_int_value(), self.tys.int, "").unwrap(),
+            Ty::Func(_, _) => // ptr -> i64
+                self.b.build_ptr_to_int(val.into_pointer_value(), self.tys.int, "").unwrap(),
+            Ty::Any | Ty::Unk | Ty::TyVar(_) => unreachable!(),
+        }
+    }
+
+    /// Convert a value to an i64 payload for the `any` type
+    fn convert_any_payload_to_type(&mut self, payload: IntValue<'a>, val_ty: &Ty) -> BasicValueEnum<'a> {
+        match val_ty {
+            Ty::Int => payload.into(),
+            Ty::Void => self.tys.int.get_undef().into(), // void values don't carry any information
+            Ty::Bool => // i64 -> i1
+                self.b.build_int_truncate(payload, self.tys.bool, "").unwrap().into(),
+            Ty::Func(_, _) => // i64 -> ptr
+                self.b.build_int_to_ptr(payload, self.tys.ptr, "").unwrap().into(),
+            Ty::Any | Ty::Unk | Ty::TyVar(_) => unreachable!(),
+        }
+    }
+
+    fn build_eq_comparison(&mut self, ty: &Ty, lhs: BasicValueEnum<'a>, rhs: BasicValueEnum<'a>) -> IntValue<'a> {
+        match ty {
+            Ty::Int => // just int comparison
+                self.b.build_int_compare(IntPredicate::EQ, lhs.into_int_value(), rhs.into_int_value(), "iseq").unwrap(),
+            Ty::Void => // void values are always equal
+                self.tys.bool.const_all_ones(),
+            Ty::Bool => // also just int comparison
+                self.b.build_int_compare(IntPredicate::EQ, lhs.into_int_value(), rhs.into_int_value(), "iseq").unwrap(),
+            Ty::Func(_, _) => // functions are equal if their pointers are equal
+                self.b.build_int_compare(IntPredicate::EQ, lhs.into_pointer_value(), rhs.into_pointer_value(), "iseq").unwrap(),
+            Ty::Any => // call a runtime function
+                self.b.build_call(self.builtins.cmp_any_fn, &[lhs.into(), rhs.into()], "iseq").unwrap().try_as_basic_value().unwrap_left().into_int_value(),
+            Ty::Unk | Ty::TyVar(_) => unreachable!(),
+        }
+    }
 }
 
 fn any_tag_of_type(ty: &Ty) -> u64 {
     match ty {
         Ty::Int => 1,
         Ty::Void => 7,
+        Ty::Bool => 2,
         // assume COMFUNC format
         Ty::Func(_,_) => 15,
         _ => unreachable!()

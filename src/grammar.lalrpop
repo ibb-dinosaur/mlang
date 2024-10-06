@@ -8,14 +8,19 @@ pub Prog: Program = {
 }
 
 Func: Function = {
-    "fun" <name:ident> "(" <params:CommaList<Param>> ")" <ret: (":" <TyExpr>)?> "{" <b:Block> "}" nl* => {
+    "fun" <name:ident> "(" <params:CommaList<Param>> ")" <ret: (":" <TyExpr>)?> <body:FuncBody> nl* => {
         Function {
             name,
             params,
             return_type: ret.unwrap_or(Ty::Unk),
-            body: b,
+            body,
         }
     }
+}
+
+FuncBody: Vec<Statement> = {
+    "end" => vec![],
+    nl <b:Block> "end" => b,
 }
 
 Param: (String, Ty) = {
@@ -37,7 +42,7 @@ TyExpr: Ty = {
 }
 
 Block: Vec<Statement> = {
-    nl* <stmts: (<Stmt> nl+)*> => {
+    <stmts: (<Stmt> nl+)*> => {
         stmts
     }
 }
@@ -51,7 +56,7 @@ Stmt: Statement = {
 }
 
 IfStmt: Statement = {
-    "if" <cond:Expr> "{" <then:Block> "}" <elseifs:ElseIf*> <else_:("else" "{" <Block> "}")?> => {
+    "if" <cond:Expr> "then" nl <then:Block> <elseifs:ElseIf*> <else_:("else" nl <Block>)?> "end" => {
         let else_ = else_.unwrap_or(vec![]);
         let mut elseifs = elseifs;
         elseifs.insert(0, (cond, then));
@@ -62,7 +67,7 @@ IfStmt: Statement = {
 }
 
 ElseIf: (Expr, Vec<Statement>) = {
-    "else" "if" <cond:Expr> "{" <then:Block> "}" => (cond, then),
+    "elseif" <cond:Expr> "then" nl <then:Block> => (cond, then),
 }
 
 Expr: Expr = {
@@ -147,10 +152,11 @@ extern {
         "false" => Token::KwFalse,
         "if" => Token::KwIf,
         "else" => Token::KwElse,
+        "elseif" => Token::KwElseif,
+        "then" => Token::KwThen,
+        "end" => Token::KwEnd,
         "(" => Token::LParen,
         ")" => Token::RParen,
-        "{" => Token::LBrace,
-        "}" => Token::RBrace,
         ":" => Token::Colon,
         "," => Token::Comma,
         "=" => Token::Assign,

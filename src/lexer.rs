@@ -33,16 +33,18 @@ pub enum Token {
     KwIf,
     #[token("else")]
     KwElse,
+    #[token("elseif")]
+    KwElseif,
+    #[token("end")]
+    KwEnd,
+    #[token("then")]
+    KwThen,
     #[token("(")]
     LParen,
     #[token(")")]
     RParen,
     #[token(":")]
     Colon,
-    #[token("{")]
-    LBrace,
-    #[token("}")]
-    RBrace,
     #[token(",")]
     Comma,
     #[token("=")]

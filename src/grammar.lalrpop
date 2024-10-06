@@ -12,7 +12,7 @@ Func: Function = {
         Function {
             name,
             params,
-            return_type: ret.unwrap_or(Ty::Any),
+            return_type: ret.unwrap_or(Ty::Unk),
             body: b,
         }
     }
@@ -37,9 +37,7 @@ TyExpr: Ty = {
 }
 
 Block: Vec<Statement> = {
-    nl* <stmts: (<Stmt> nl+)*> <s:Stmt> nl* => {
-        let mut stmts = stmts;
-        stmts.push(s);
+    nl* <stmts: (<Stmt> nl+)*> => {
         stmts
     }
 }
@@ -75,7 +73,9 @@ Call: Expr = {
 
 Atom: Expr = {
     <v:ident> => ExprKind::Var(v).expr(),
-    <n:int> => ExprKind::IntLiteral(n).expr(),
+    <n:int> => ExprKind::Literal(Literal::Int(n)).expr(),
+    "true" => ExprKind::Literal(Literal::Bool(true)).expr(),
+    "false" => ExprKind::Literal(Literal::Bool(false)).expr(),
     "(" <e:Expr> ")" => e,
 };
 
@@ -127,6 +127,8 @@ extern {
         "void" => Token::KwVoid,
         "any" => Token::KwAny,
         "bool" => Token::KwBool,
+        "true" => Token::KwTrue,
+        "false" => Token::KwFalse,
         "(" => Token::LParen,
         ")" => Token::RParen,
         "{" => Token::LBrace,

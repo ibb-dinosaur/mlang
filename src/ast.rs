@@ -28,13 +28,20 @@ impl Ty {
 
 #[derive(Clone, PartialEq)]
 pub enum ExprKind {
-    IntLiteral(i64),
+    Literal(Literal),
     Var(String),
     BinOp(BinOp, Box<Expr>, Box<Expr>),
     TypeCast(TypeCastKind, Box<Expr>),
     Call(Box<Expr>, Vec<Expr>),
     //FunctionCall(String, Vec<Expr>),
     // Add more expression kinds as needed
+}
+
+#[derive(Clone, PartialEq)]
+pub enum Literal {
+    Void,
+    Int(i64),
+    Bool(bool),
 }
 
 impl ExprKind {
@@ -112,6 +119,21 @@ impl Function {
     }
 }
 
+#[derive(Clone)]
+pub struct Program {
+    pub functions: Vec<Function>,
+}
+
+impl Program {
+    pub fn new() -> Self {
+        Program { functions: vec![] }
+    }
+}
+
+
+// Display implementations
+
+
 impl std::fmt::Display for BinOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", match self {
@@ -154,7 +176,9 @@ impl std::fmt::Display for Ty {
 impl Expr {
     fn display(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
-            ExprKind::IntLiteral(i) => write!(f, "{}", i),
+            ExprKind::Literal(Literal::Void) => write!(f, "void"),
+            ExprKind::Literal(Literal::Int(i)) => write!(f, "{}", i),
+            ExprKind::Literal(Literal::Bool(b)) => write!(f, "{}", b),
             ExprKind::Var(s) => write!(f, "{}:{}", s, self.ty),
             ExprKind::BinOp(op, lhs, rhs) => {
                 write!(f, "(")?;
@@ -218,17 +242,6 @@ impl std::fmt::Display for Function {
             writeln!(f)?;
         }
         writeln!(f, "}}")
-    }
-}
-
-#[derive(Clone)]
-pub struct Program {
-    pub functions: Vec<Function>,
-}
-
-impl Program {
-    pub fn new() -> Self {
-        Program { functions: vec![] }
     }
 }
 

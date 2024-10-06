@@ -124,8 +124,14 @@ impl<'a> Compiler<'a> {
 
     fn emit_expr(&mut self, e: &Expr) -> BasicValueEnum<'a> {
         match &e.kind {
-            ExprKind::IntLiteral(n) => {
+            ExprKind::Literal(Literal::Int(n)) => {
                 self.tys.int.const_int(*n as u64, false).into()
+            },
+            ExprKind::Literal(Literal::Bool(b)) => {
+                self.tys.bool.const_int(*b as u64, false).into()
+            },
+            ExprKind::Literal(Literal::Void) => {
+                self.tys.int.get_undef().into()
             },
             ExprKind::Var(name) => {
                 match self.locals.get(name) {

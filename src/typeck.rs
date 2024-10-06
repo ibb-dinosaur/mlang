@@ -218,8 +218,12 @@ impl TypeChecker {
     fn check_expr(&mut self, expr: &mut Expr) {
         let Expr { ty: expr_type, kind } = expr;
         match kind {
-            ExprKind::IntLiteral(_) => {
-                *expr_type = Ty::Int
+            ExprKind::Literal(lit) => {
+                *expr_type = match lit {
+                    Literal::Void => Ty::Void,
+                    Literal::Int(_) => Ty::Int,
+                    Literal::Bool(_) => Ty::Bool,
+                }
             },
             ExprKind::Var(name) => {
                 *expr_type = self.get_symbol_type(name);
@@ -286,7 +290,7 @@ impl TypeChecker {
     fn resolve_expr(&mut self, expr: &mut Expr) {
         let Expr { ty: expr_type, kind } = expr;
         match kind {
-            ExprKind::IntLiteral(_) => {},
+            ExprKind::Literal(_) => {},
             ExprKind::Var(name) => {
                 let var_type = self.get_resolved(&self.get_symbol_type(name));
                 let expected_type = self.get_resolved(expr_type);
@@ -329,7 +333,7 @@ impl TypeChecker {
 
 // this is to get around the borrow checker
 fn insert_cast(e: &mut Expr, expected_ty: Ty) {
-    let expr = std::mem::replace(e, ExprKind::IntLiteral(0).expr()); // temporary expression
+    let expr = std::mem::replace(e, ExprKind::Literal(Literal::Void).expr()); // temporary expression
     *e = cast(expr, expected_ty);
 }
 

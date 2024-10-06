@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use inkwell::{attributes::{Attribute, AttributeLoc}, basic_block::BasicBlock, builder::Builder, context::Context, intrinsics::Intrinsic, llvm_sys::LLVMAttributeFunctionIndex, module::Module, types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType, StructType, VoidType}, values::{AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue}, AddressSpace, IntPredicate};
 
-use crate::ast::*;
+use crate::{ast::*, util::ScopedMap};
 
 pub struct Compiler<'a> {
     ctx: &'a Context,
@@ -12,7 +12,7 @@ pub struct Compiler<'a> {
     builtins: Builtins<'a>,
     globals: HashMap<String, GlobalValue<'a>>,
     // all locals are `alloca`d
-    locals: HashMap<String, PointerValue<'a>>,
+    locals: ScopedMap<String, PointerValue<'a>>,
     obj_type_tags: BTreeMap<Ty, GlobalValue<'a>>
 }
 
@@ -47,7 +47,7 @@ impl<'a> Compiler<'a> {
         type_cast_fail_fn.add_attribute(AttributeLoc::Function, ctx.create_enum_attribute(38, 0)); // nounwind
         let cmp_any_fn = m.add_function("__cmp_any", bool.fn_type(&[any.into(), any.into()], false), None);
         cmp_any_fn.add_attribute(AttributeLoc::Function, ctx.create_enum_attribute(38, 0)); // nounwind
-        Self { ctx, m, b, tys: PrimTypes { int, c_void, any, ptr, bool }, builtins: Builtins { type_cast_fail_fn, cmp_any_fn }, globals: HashMap::new(), locals: HashMap::new(), obj_type_tags: BTreeMap::new() }
+        Self { ctx, m, b, tys: PrimTypes { int, c_void, any, ptr, bool }, builtins: Builtins { type_cast_fail_fn, cmp_any_fn }, globals: HashMap::new(), locals: ScopedMap::new(), obj_type_tags: BTreeMap::new() }
     }
 
     pub fn emit_program(&mut self, p: &Program) {
@@ -116,7 +116,7 @@ impl<'a> Compiler<'a> {
             },
             Statement::Assign(name, expr) => {
                 let val = self.emit_expr(expr);
-                let place = self.locals[name];
+                let place = self.locals[name.as_str()];
                 self.b.build_store(place, val).unwrap();
             },
         }

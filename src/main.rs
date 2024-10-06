@@ -13,6 +13,7 @@ mod semantic;
 mod compile;
 mod rt;
 mod llvm_extras;
+mod util;
 //mod gccjit;
 //mod mir;
 

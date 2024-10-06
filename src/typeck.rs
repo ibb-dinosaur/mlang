@@ -7,7 +7,7 @@ Type-checking takes several stages:
 
 use std::{borrow::Borrow, collections::HashMap, fmt::Display, hash::Hash};
 
-use crate::ast::*;
+use crate::{ast::*, util::ScopedMap};
 
 #[derive(Debug)]
 struct InferenceContext {
@@ -139,20 +139,19 @@ impl InferenceContext {
 #[derive(Debug, Clone)]
 struct InferencePair { src_ty: Ty, dst_ty: Ty }
 
-#[derive(Debug)]
 pub struct TypeChecker {
     globals: HashMap<String, Ty>,
     // local to a function
     ctx: InferenceContext,
-    vars: HashMap<String, Ty>,
+    vars: ScopedMap<String, Ty>,
 }
 
 impl TypeChecker {
     pub fn new() -> Self {
-        Self { globals: HashMap::new(), ctx: InferenceContext::new(), vars: HashMap::new() }
+        Self { globals: HashMap::new(), ctx: InferenceContext::new(), vars: ScopedMap::new() }
     }
 
-    fn get_symbol_type<T: Hash + Eq + Display>(&self, name: &T) -> Ty where String: Borrow<T> {
+    fn get_symbol_type(&self, name: &str) -> Ty {
         match self.vars.get(name) {
             Some(lty) => lty.clone(),
             None => match self.globals.get(name) {
@@ -173,12 +172,12 @@ impl TypeChecker {
     }
 
     fn check_func(&mut self, func: &mut Function) {
-        self.vars.clear();
+        self.vars.reset();
         self.ctx = InferenceContext::new();
         for (name, ty) in &func.params {
-            self.vars.insert(name.clone(), ty.clone());
+            self.vars.insert_new(name.clone(), ty.clone());
         }
-        self.vars.insert("$return".to_string(), func.return_type.clone());
+        self.vars.insert_new("$return".to_string(), func.return_type.clone());
         // 1. collect type variables
         for stmt in &mut func.body {
             self.check_stmt(stmt);
@@ -204,7 +203,7 @@ impl TypeChecker {
             Statement::Let(name, expr) => {
                 let var_ty = self.ctx.new_var();
                 self.check_expr(expr);
-                self.vars.insert(name.clone(), var_ty.clone());
+                self.vars.insert_new(name.clone(), var_ty.clone());
                 self.ctx.add_pair(expr.ty.clone(), var_ty);
             }
             Statement::Assign(name, expr) => {
@@ -281,7 +280,7 @@ impl TypeChecker {
             Statement::Let(name, expr) | 
             Statement::Assign(name, expr) => {
                 self.resolve_expr(expr);
-                let var_ty = self.get_resolved(&self.vars[&*name]);
+                let var_ty = self.get_resolved(&self.vars[name.as_str()]);
                 insert_cast(expr, var_ty);
             }
         }

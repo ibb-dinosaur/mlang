@@ -5,7 +5,7 @@ Type-checking takes several stages:
 3. Assigning types to expressions and inserting type casts where needed
 */
 
-use std::{borrow::Borrow, collections::HashMap, fmt::Display, hash::Hash};
+use std::collections::HashMap;
 
 use crate::{ast::*, util::ScopedMap};
 
@@ -179,15 +179,19 @@ impl TypeChecker {
         }
         self.vars.insert_new("$return".to_string(), func.return_type.clone());
         // 1. collect type variables
+        self.vars.enter_new_scope();
         for stmt in &mut func.body {
             self.check_stmt(stmt);
         }
+        self.vars.exit_scope();
         // 2. unify type variables
         self.ctx.unify_all();
         // 3. assign types to expressions, insert casts
+        self.vars.enter_new_scope();
         for stmt in &mut func.body {
             self.resolve_stmt(stmt);
         }
+        self.vars.exit_scope();
         // done! (hopefully)
     }
 
@@ -204,18 +208,34 @@ impl TypeChecker {
                 let var_ty = self.ctx.new_var();
                 self.check_expr(expr);
                 self.vars.insert_new(name.clone(), var_ty.clone());
-                self.ctx.add_pair(expr.ty.clone(), var_ty);
+                self.ctx.add_pair(expr.ty.clone(), var_ty.clone());
+                // save the typevar assigned to this variable
+                expr.set_extra(var_ty);
             }
             Statement::Assign(name, expr) => {
                 self.check_expr(expr);
                 let var_ty = self.vars.get(name).unwrap();
                 self.ctx.add_pair(expr.ty.clone(), var_ty.clone());
             }
+            Statement::If(cond, then_, else_) => {
+                self.check_expr(cond);
+                self.ctx.add_pair(cond.ty.clone(), Ty::Bool);
+                self.vars.enter_new_scope();
+                for stmt in then_ {
+                    self.check_stmt(stmt);
+                }
+                self.vars.exit_scope();
+                self.vars.enter_new_scope();
+                for stmt in else_ {
+                    self.check_stmt(stmt);
+                }
+                self.vars.exit_scope();
+            }
         }
     }
 
     fn check_expr(&mut self, expr: &mut Expr) {
-        let Expr { ty: expr_type, kind } = expr;
+        let Expr { ty: expr_type, kind, .. } = expr;
         match kind {
             ExprKind::Literal(lit) => {
                 *expr_type = match lit {
@@ -230,10 +250,14 @@ impl TypeChecker {
             ExprKind::BinOp(op, lhs, rhs) => {
                 self.check_expr(lhs);
                 self.check_expr(rhs);
-                if op.is_arithmetic() || op.is_ord_comparison() { // (int, int) -> int
+                if op.is_arithmetic() { // (int, int) -> int
                     self.ctx.add_pair(lhs.ty.clone(), Ty::Int);
                     self.ctx.add_pair(rhs.ty.clone(), Ty::Int);
                     *expr_type = Ty::Int
+                } else if op.is_ord_comparison() { // (int, int) -> bool
+                    self.ctx.add_pair(lhs.ty.clone(), Ty::Int);
+                    self.ctx.add_pair(rhs.ty.clone(), Ty::Int);
+                    *expr_type = Ty::Bool;
                 } else if op.is_eq_comparison() { // (T, T) -> bool (have to be the same type)
                     self.ctx.add_pair(lhs.ty.clone(), rhs.ty.clone());
                     self.ctx.add_pair(rhs.ty.clone(), lhs.ty.clone());
@@ -277,17 +301,36 @@ impl TypeChecker {
                 let ret_ty = self.get_resolved(&self.vars["$return"]);
                 insert_cast(expr, ret_ty);
             }
-            Statement::Let(name, expr) | 
+            Statement::Let(name, expr) => {
+                // restore the type var assigned to this variable
+                let var_ty: Ty = expr.get_extra::<Ty>().unwrap().clone();
+                self.resolve_expr(expr);
+                insert_cast(expr, var_ty);
+            }
             Statement::Assign(name, expr) => {
                 self.resolve_expr(expr);
                 let var_ty = self.get_resolved(&self.vars[name.as_str()]);
                 insert_cast(expr, var_ty);
             }
+            Statement::If(cond, then_, else_) => {
+                self.resolve_expr(cond);
+                insert_cast(cond, Ty::Bool);
+                self.vars.enter_new_scope();
+                for stmt in then_ {
+                    self.resolve_stmt(stmt);
+                }
+                self.vars.exit_scope();
+                self.vars.enter_new_scope();
+                for stmt in else_ {
+                    self.resolve_stmt(stmt);
+                }
+                self.vars.exit_scope();
+            }
         }
     }
 
     fn resolve_expr(&mut self, expr: &mut Expr) {
-        let Expr { ty: expr_type, kind } = expr;
+        let Expr { ty: expr_type, kind, .. } = expr;
         match kind {
             ExprKind::Literal(_) => {},
             ExprKind::Var(name) => {
@@ -299,10 +342,14 @@ impl TypeChecker {
             ExprKind::BinOp(op, lhs, rhs) => {
                 self.resolve_expr(lhs);
                 self.resolve_expr(rhs);
-                if op.is_arithmetic() || op.is_ord_comparison() {
+                if op.is_arithmetic() {
                     insert_cast(lhs, Ty::Int);
                     insert_cast(rhs, Ty::Int);
                     *expr_type = Ty::Int;
+                } else if op.is_ord_comparison() {
+                    insert_cast(lhs, Ty::Int);
+                    insert_cast(rhs, Ty::Int);
+                    *expr_type = Ty::Bool;
                 } else if op.is_eq_comparison() {
                     let lhs_type = self.get_resolved(&lhs.ty);
                     insert_cast(rhs, lhs_type);
@@ -341,6 +388,9 @@ fn cast(e: Expr, expected_ty: Ty) -> Expr {
         e
     } else if expected_ty == Ty::Any {
         ExprKind::TypeCast(TypeCastKind::ToAny, Box::new(e)).expr_typed(Ty::Any)
+    } else if expected_ty == Ty::Bool {
+        // TODO: should arbitrary types be implicitly cast to bool?
+        unimplemented!()
     } else if e.ty == Ty::Any && expected_ty.is_simple() {
         ExprKind::TypeCast(TypeCastKind::FromAnySimple, Box::new(e)).expr_typed(expected_ty)
     } /*else if e.ty == Ty::Any && expected_ty.is_func() {

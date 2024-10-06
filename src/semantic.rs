@@ -1,9 +1,29 @@
 //! Various semantic checks for the AST
 
-use crate::ast::{Expr, ExprKind, Function, Program, Statement, Ty};
+use crate::ast::{ExprKind, Function, Program, Statement, Ty};
 
 pub struct SemanticPreTypingChecker {
 
+}
+
+fn has_return_recursive(stmts: &[Statement]) -> bool {
+    stmts.iter().any(|s| {
+        match s {
+            Statement::Return(_) => true,
+            Statement::If(_, then_, else_) => 
+                has_return_recursive(then_) || has_return_recursive(else_),
+            _ => false
+        }
+    })
+}
+
+fn does_every_branch_return(stmts: &[Statement]) -> bool {
+    match stmts.last() {
+        Some(Statement::Return(_)) => true,
+        Some(Statement::If(_, then_, else_)) =>
+            does_every_branch_return(then_) && does_every_branch_return(else_),
+        _ => false
+    }
 }
 
 impl SemanticPreTypingChecker {
@@ -19,14 +39,8 @@ impl SemanticPreTypingChecker {
     /// - otherwise, infer the return type as any
     fn infer_function_return_type(&mut self, f: &mut Function) {
         if f.return_type == Ty::Unk {
-            let mut found_explicit_return = false;
-            for stmt in &f.body {
-                if let Statement::Return(_) = stmt {
-                    found_explicit_return = true;
-                    break;
-                }
-            }
-            if found_explicit_return {
+            let has_explicit_return = has_return_recursive(&f.body);
+            if has_explicit_return {
                 f.return_type = Ty::Any;
             } else {
                 f.return_type = Ty::Void;
@@ -37,17 +51,15 @@ impl SemanticPreTypingChecker {
     fn check_function_returns(&mut self, f: &mut Function) {
         if f.return_type != Ty::Void {
             // function must have explicit return
-            if let Some(Statement::Return(_)) = f.body.last() {
+            if does_every_branch_return(&f.body) {
                 // ok
             } else {
                 panic!("function {} missing return statement", f.name);
             }
         } else {
             // if function type is void, insert implicit return at the end
-            f.body.push(Statement::Return(Expr { 
-                ty: Ty::Void,
-                kind: ExprKind::Literal(crate::ast::Literal::Void)
-             }))
+            f.body.push(Statement::Return(
+                ExprKind::Literal(crate::ast::Literal::Void).expr_typed(Ty::Void)));
         }
     }
 }

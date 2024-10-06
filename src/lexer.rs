@@ -29,6 +29,10 @@ pub enum Token {
     KwTrue,
     #[token("false")]
     KwFalse,
+    #[token("if")]
+    KwIf,
+    #[token("else")]
+    KwElse,
     #[token("(")]
     LParen,
     #[token(")")]

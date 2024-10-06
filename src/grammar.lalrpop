@@ -43,10 +43,26 @@ Block: Vec<Statement> = {
 }
 
 Stmt: Statement = {
+    IfStmt,
     "return" <e:Expr> => Statement::Return(e),
     "let" <name:ident> "=" <e:Expr> => Statement::Let(name, e),
     <var:ident> "=" <e:Expr> => Statement::Assign(var, e),
     <e:Expr> => Statement::ExprStmt(e)
+}
+
+IfStmt: Statement = {
+    "if" <cond:Expr> "{" <then:Block> "}" <elseifs:ElseIf*> <else_:("else" "{" <Block> "}")?> => {
+        let else_ = else_.unwrap_or(vec![]);
+        let mut elseifs = elseifs;
+        elseifs.insert(0, (cond, then));
+        elseifs.into_iter().rev().fold(else_, |else_, (cond, then)| {
+            vec![Statement::If(cond, then, else_)]
+        }).pop().unwrap()
+    }
+}
+
+ElseIf: (Expr, Vec<Statement>) = {
+    "else" "if" <cond:Expr> "{" <then:Block> "}" => (cond, then),
 }
 
 Expr: Expr = {
@@ -129,6 +145,8 @@ extern {
         "bool" => Token::KwBool,
         "true" => Token::KwTrue,
         "false" => Token::KwFalse,
+        "if" => Token::KwIf,
+        "else" => Token::KwElse,
         "(" => Token::LParen,
         ")" => Token::RParen,
         "{" => Token::LBrace,

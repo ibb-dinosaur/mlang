@@ -26,7 +26,6 @@ impl Ty {
     }
 }
 
-#[derive(Clone, PartialEq)]
 pub enum ExprKind {
     Literal(Literal),
     Var(String),
@@ -46,18 +45,30 @@ pub enum Literal {
 
 impl ExprKind {
     pub fn expr(self) -> Expr {
-        Expr { ty: Ty::Unk, kind: self }
+        Expr { ty: Ty::Unk, kind: self, extra: None }
     }
 
     pub fn expr_typed(self, ty: Ty) -> Expr {
-        Expr { ty, kind: self }
+        Expr { ty, kind: self, extra: None }
     }
 }
 
-#[derive(Clone, PartialEq)]
 pub struct Expr {
     pub ty: Ty,  // The type of the expression
     pub kind: ExprKind,   // The actual kind of expression
+    /// Arbitrary extra data that can be attached to an expression during analysis
+    pub extra: Option<Box<dyn std::any::Any>>,
+}
+
+impl Expr {
+    pub fn set_extra<T: 'static>(&mut self, extra: T) {
+        debug_assert!(self.extra.is_none());
+        self.extra = Some(Box::new(extra));
+    }
+
+    pub fn get_extra<T: 'static>(&self) -> Option<&T> {
+        self.extra.as_ref().and_then(|b| b.downcast_ref())
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -97,15 +108,14 @@ pub enum TypeCastKind {
     FromAnyToFunc,
 }
 
-#[derive(Clone, PartialEq)]
 pub enum Statement {
     ExprStmt(Expr),       // Expression statement
     Return(Expr),         // Return statement
     Let(String, Expr),    // Variable declaration and assignment
     Assign(String, Expr),
+    If(Expr, Vec<Statement>, Vec<Statement>)
 }
 
-#[derive(Clone, PartialEq)]
 pub struct Function {
     pub name: String,
     pub params: Vec<(String, Ty)>,
@@ -119,7 +129,6 @@ impl Function {
     }
 }
 
-#[derive(Clone)]
 pub struct Program {
     pub functions: Vec<Function>,
 }
@@ -222,6 +231,23 @@ impl Statement {
             Statement::Assign(s, e) => {
                 write!(f, "{} = ", s)?;
                 e.display(f)
+            }
+            Statement::If(cond, then_, else_) => {
+                write!(f, "if ")?;
+                cond.display(f)?;
+                writeln!(f, " {{")?;
+                for stmt in then_ {
+                    stmt.display(f)?;
+                    writeln!(f)?;
+                }
+                if !else_.is_empty() {
+                    writeln!(f, "}} else {{")?;
+                    for stmt in else_ {
+                        stmt.display(f)?;
+                        writeln!(f)?;
+                    }
+                }
+                write!(f, "}}")
             }
         }
     }

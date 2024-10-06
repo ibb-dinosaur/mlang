@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use inkwell::{attributes::{Attribute, AttributeLoc}, basic_block::BasicBlock, builder::Builder, context::Context, intrinsics::Intrinsic, llvm_sys::LLVMAttributeFunctionIndex, module::Module, types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType, StructType, VoidType}, values::{AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue}, AddressSpace, IntPredicate};
+use inkwell::{attributes::{AttributeLoc}, basic_block::BasicBlock, builder::Builder, context::Context, module::Module, types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType, StructType, VoidType}, values::{AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue}, AddressSpace, IntPredicate};
 
 use crate::{ast::*, util::ScopedMap};
 
@@ -91,11 +91,10 @@ impl<'a> Compiler<'a> {
         }
 
         if self.b.get_insert_block().unwrap().get_terminator().is_none() {
-            // if the function doesn't end with a return statement, add a return void
-            // a void value is represented as an undef i64
-            self.b.build_return(Some(&self.tys.int.get_undef())).unwrap();
+            // if the current block doesn't end with return,
+            // it must be unreachable
+            self.b.build_unreachable().unwrap();
         }
-        //func.verify(true);
     }
 
     fn emit_statement(&mut self, s: &Statement) {
@@ -118,6 +117,34 @@ impl<'a> Compiler<'a> {
                 let val = self.emit_expr(expr);
                 let place = self.locals[name.as_str()];
                 self.b.build_store(place, val).unwrap();
+            },
+            Statement::If(cond, then_, else_) => {
+                let cond = self.emit_expr(cond);
+                let then_bb = self.new_bb("then");
+                let else_bb = self.new_bb("else");
+                let join_bb = self.new_bb("");
+                self.b.build_conditional_branch(cond.into_int_value(), then_bb, else_bb).unwrap();
+                // then branch
+                self.b.position_at_end(then_bb);
+                self.locals.enter_new_scope();
+                for stmt in then_ {
+                    self.emit_statement(stmt);
+                }
+                self.locals.exit_scope();
+                if self.b.get_insert_block().unwrap().get_terminator().is_none() {
+                    self.b.build_unconditional_branch(join_bb).unwrap();
+                }
+                // else branch
+                self.b.position_at_end(else_bb);
+                self.locals.enter_new_scope();
+                for stmt in else_ {
+                    self.emit_statement(stmt);
+                }
+                self.locals.exit_scope();
+                if self.b.get_insert_block().unwrap().get_terminator().is_none() {
+                    self.b.build_unconditional_branch(join_bb).unwrap();
+                }
+                self.b.position_at_end(join_bb);
             },
         }
     }

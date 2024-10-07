@@ -29,6 +29,13 @@ impl Ty {
     pub fn is_nominal(&self) -> bool {
         self.is_primitive() || matches!(self, Ty::Named(_) | Ty::UserTy(_))
     }
+
+    pub fn get_struct(&self) -> &TypeDef {
+        match self {
+            Ty::UserTy(ty) => ty,
+            _ => panic!("not a user type")
+        }
+    }
 }
 
 pub enum ExprKind {
@@ -37,6 +44,7 @@ pub enum ExprKind {
     BinOp(BinOp, Box<Expr>, Box<Expr>),
     TypeCast(TypeCastKind, Box<Expr>),
     Call(Box<Expr>, Vec<Expr>),
+    New(Ty, Vec<Expr>),
     //FunctionCall(String, Vec<Expr>),
     // Add more expression kinds as needed
 }
@@ -256,6 +264,16 @@ impl Expr {
             ExprKind::Call(e, args) => {
                 e.display(f)?;
                 write!(f, "(")?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    arg.display(f)?;
+                }
+                write!(f, ")")
+            }
+            ExprKind::New(ty, args) => {
+                write!(f, "new {}(", ty)?;
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;

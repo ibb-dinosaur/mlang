@@ -101,6 +101,7 @@ Factor: Expr = {
 
 Call: Expr = {
     <a:Atom> "(" <args:CommaList<Expr>> ")" => ExprKind::Call(Box::new(a), args).expr(),
+    "new" <ty:ident> "(" <args:CommaList<Expr>> ")" => ExprKind::New(Ty::Named(ty), args).expr(),
     <a:Atom> => a,
 };
 
@@ -164,6 +165,7 @@ extern {
         "then" => Token::KwThen,
         "end" => Token::KwEnd,
         "type" => Token::KwType,
+        "new" => Token::KwNew,
         "(" => Token::LParen,
         ")" => Token::RParen,
         ":" => Token::Colon,

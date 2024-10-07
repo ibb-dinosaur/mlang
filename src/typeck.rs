@@ -263,6 +263,17 @@ impl TypeChecker {
                 let expected_fty = Ty::Func(Box::new(ret_type), arg_types.into());
                 self.ctx.add_pair(expected_fty, callee.ty.clone());
             }
+            ExprKind::New(ty, args) => {
+                let obj_ty = ty.get_struct().get();
+                if obj_ty.fields.len() != args.len() {
+                    panic!("wrong number of arguments to constructor")
+                }
+                for i in 0..args.len() {
+                    self.check_expr(&mut args[i]);
+                    self.ctx.add_pair(args[i].ty.clone(), obj_ty.fields[i].1.clone());
+                }
+                *expr_type = ty.clone();
+            }
         }
     }
 
@@ -356,6 +367,18 @@ impl TypeChecker {
                 }
                 let expected_type = self.get_resolved(expr_type);
                 *expr_type = ret_ty;
+                insert_cast(expr, expected_type);
+            }
+            ExprKind::New(ty, args) => {
+                {
+                    let obj_ty = ty.get_struct().get();
+                    for (i, arg) in args.iter_mut().enumerate() {
+                        self.resolve_expr(arg);
+                        insert_cast(arg, obj_ty.fields[i].1.clone());
+                    }
+                }
+                let expected_type = self.get_resolved(expr_type);
+                *expr_type = ty.clone();
                 insert_cast(expr, expected_type);
             }
             ExprKind::TypeCast(_, _) => unreachable!()
@@ -476,6 +499,10 @@ impl TypeLookup {
                 self.lookup_in_expr(callee);
                 args.iter_mut().for_each(|a| self.lookup_in_expr(a));
             },
+            ExprKind::New(ty, args) => {
+                args.iter_mut().for_each(|a| self.lookup_in_expr(a));
+                *ty = self.lookup_ty(ty);
+            }
             ExprKind::TypeCast(_, _) => unreachable!()
         }
     }

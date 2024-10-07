@@ -9,7 +9,6 @@ pub struct Compiler<'a> {
     m: Module<'a>,
     b: Builder<'a>,
     tys: PrimTypes<'a>,
-    builtins: Builtins<'a>,
     globals: HashMap<String, GlobalValue<'a>>,
     // all locals are `alloca`d
     locals: ScopedMap<String, PointerValue<'a>>,
@@ -25,11 +24,6 @@ pub struct PrimTypes<'a> {
     bool: IntType<'a>,
 }
 
-pub struct Builtins<'a> {
-    type_cast_fail_fn: FunctionValue<'a>,
-    cmp_any_fn: FunctionValue<'a>,
-}
-
 impl<'a> Compiler<'a> {
     pub fn new(ctx: &'a Context) -> Self {
         let m = ctx.create_module("main");
@@ -40,18 +34,27 @@ impl<'a> Compiler<'a> {
         let ptr = ctx.ptr_type(AddressSpace::default());
         let bool = ctx.custom_width_int_type(1);
         let any = ctx.struct_type(&[int.into(), int.into()], false);
-        // initialize builtins
-        let t1 = c_void.fn_type(&[int.into(), int.into(), int.into()], false);
-        let type_cast_fail_fn = m.add_function("__tc_fail1", t1, None);
-        type_cast_fail_fn.add_attribute(AttributeLoc::Function, ctx.create_enum_attribute(5, 0)); // cold
-        type_cast_fail_fn.add_attribute(AttributeLoc::Function, ctx.create_enum_attribute(33, 0)); // noreturn
-        type_cast_fail_fn.add_attribute(AttributeLoc::Function, ctx.create_enum_attribute(38, 0)); // nounwind
-        let cmp_any_fn = m.add_function("__cmp_any", bool.fn_type(&[any.into(), any.into()], false), None);
-        cmp_any_fn.add_attribute(AttributeLoc::Function, ctx.create_enum_attribute(38, 0)); // nounwind
-        Self { ctx, m, b, tys: PrimTypes { int, c_void, any, ptr, bool }, builtins: Builtins { type_cast_fail_fn, cmp_any_fn }, globals: HashMap::new(), locals: ScopedMap::new(), obj_type_tags: BTreeMap::new(), user_type_structs: BTreeMap::new() }
+        Self { ctx, m, b, tys: PrimTypes { int, c_void, any, ptr, bool }, globals: HashMap::new(), locals: ScopedMap::new(), obj_type_tags: BTreeMap::new(), user_type_structs: BTreeMap::new() }
     }
 
-    pub fn emit_program(&mut self, p: &Program) {
+    fn initialize_builtins(&mut self) {
+        let t1: inkwell::types::FunctionType<'_> = self.tys.c_void.fn_type(&[self.tys.int.into(), self.tys.int.into(), self.tys.int.into()], false);
+        let type_cast_fail_fn = self.m.add_function("__tc_fail1", t1, None);
+        type_cast_fail_fn.add_attribute(AttributeLoc::Function, self.ctx.create_enum_attribute(5, 0)); // cold
+        type_cast_fail_fn.add_attribute(AttributeLoc::Function, self.ctx.create_enum_attribute(33, 0)); // noreturn
+        type_cast_fail_fn.add_attribute(AttributeLoc::Function, self.ctx.create_enum_attribute(38, 0)); // nounwind
+
+        let cmp_any_fn = self.m.add_function("__cmp_any", 
+            self.tys.bool.fn_type(&[self.tys.any.into(), self.tys.any.into()], false), None);
+        cmp_any_fn.add_attribute(AttributeLoc::Function, self.ctx.create_enum_attribute(38, 0)); // nounwind
+    
+        let alloc_fn = self.m.add_function("__allocm", 
+            self.tys.ptr.fn_type(&[self.tys.int.into()], false), None);
+        alloc_fn.add_attribute(AttributeLoc::Function, self.ctx.create_string_attribute("allockind", "alloc"));
+    }
+
+    pub fn emit_program(mut self, p: &Program) {
+        self.initialize_builtins();
         // declare all user types
         for td in &p.user_types {
             let t = td.get();
@@ -63,6 +66,8 @@ impl<'a> Compiler<'a> {
             self.user_type_structs.insert(td.clone(), s);
             // also generate type tag
             self.make_usertype_type_tag(td);
+            // and constructor
+            self.emit_default_constructor(td);
         }
         // declare all functions
         for f in &p.functions {
@@ -261,6 +266,14 @@ impl<'a> Compiler<'a> {
                     self.b.build_indirect_call(fty, callee, &args, "").unwrap()
                 }.try_as_basic_value().unwrap_left()
             },
+            ExprKind::New(ty, args) => {
+                let mut args_v = Vec::<BasicMetadataValueEnum<'_>>::new();
+                for arg in args {
+                    args_v.push(self.emit_expr(arg).into());
+                }
+                let constructor = self.m.get_function(&format!("{}.ctor", ty.get_struct().get().name)).unwrap();
+                self.b.build_call(constructor, &args_v, "").unwrap().try_as_basic_value().unwrap_left()
+            }
         }
     }
 
@@ -269,10 +282,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn build_typecast_fail(&self, expected_tag: IntValue<'a>, actual_tag: IntValue<'a>, payload: BasicValueEnum<'a>) {
-        /*let trap_intr = Intrinsic::find("llvm.trap").unwrap();
-        let trap_fn = trap_intr.get_declaration(&self.m, &[]).unwrap();
-        self.b.build_call(trap_fn, &[], "").unwrap();*/
-        let fail_fn = self.builtins.type_cast_fail_fn;
+        let fail_fn = self.m.get_function("__tc_fail1").unwrap();
         self.b.build_call(fail_fn, &[expected_tag.into(), actual_tag.into(), payload.into()], "").unwrap();
         self.b.build_unreachable().unwrap();
     }
@@ -380,10 +390,30 @@ impl<'a> Compiler<'a> {
             Ty::Func(_, _) => // functions are equal if their pointers are equal
                 self.b.build_int_compare(IntPredicate::EQ, lhs.into_pointer_value(), rhs.into_pointer_value(), "iseq").unwrap(),
             Ty::Any => // call a runtime function
-                self.b.build_call(self.builtins.cmp_any_fn, &[lhs.into(), rhs.into()], "iseq").unwrap().try_as_basic_value().unwrap_left().into_int_value(),
+                self.b.build_call(self.m.get_function("__cmp_any").unwrap(), 
+                    &[lhs.into(), rhs.into()], "iseq").unwrap().try_as_basic_value().unwrap_left().into_int_value(),
             Ty::UserTy(_) => todo!(),
             Ty::Unk | Ty::TyVar(_) | Ty::Named(_) => unreachable!(),
         }
+    }
+
+    fn emit_default_constructor(&mut self, td: &TypeDef) {
+        let t = td.get();
+        let struct_ty = self.user_type_structs.get(td).unwrap();
+        let argtys: Vec<_> = t.fields.iter().map(|x| self.lower_ty(&x.1).into()).collect();
+        let fty = self.tys.ptr.fn_type(&argtys, false);
+        let f = self.m.add_function(&format!("{}.ctor", t.name), fty, None);
+        let entry_bb = self.ctx.append_basic_block(f, "entry");
+        self.b.position_at_end(entry_bb);
+        let alloc_size = struct_ty.size_of().unwrap();
+        let obj = self.b.build_call(self.m.get_function("__allocm").unwrap(),
+            &[alloc_size.into()], "obj").unwrap().try_as_basic_value().unwrap_left().into_pointer_value();
+        for i in 0..t.fields.len() {
+            let field = self.b.build_struct_gep(*struct_ty, obj, i as u32, "").unwrap();
+            let arg = f.get_nth_param(i as u32).unwrap();
+            self.b.build_store(field, arg).unwrap();
+        }
+        self.b.build_return(Some(&obj)).unwrap();
     }
 }
 

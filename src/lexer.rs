@@ -33,6 +33,8 @@ pub enum Token {
     KwThen,
     #[token("type")]
     KwType,
+    #[token("new")]
+    KwNew,
     #[token("(")]
     LParen,
     #[token(")")]

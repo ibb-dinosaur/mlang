@@ -131,9 +131,9 @@ impl<'a> Compiler<'a> {
                 self.b.build_store(place, val).unwrap();
                 self.locals.insert(name.clone(), place);
             },
-            Statement::Assign(name, expr) => {
+            Statement::Assign(lhs, expr) => {
                 let val = self.emit_expr(expr);
-                let place = self.locals[name.as_str()];
+                let place = self.emit_lvalue(lhs);
                 self.b.build_store(place, val).unwrap();
             },
             Statement::If(cond, then_, else_) => {
@@ -274,6 +274,28 @@ impl<'a> Compiler<'a> {
                 let constructor = self.m.get_function(&format!("{}.ctor", ty.get_struct().get().name)).unwrap();
                 self.b.build_call(constructor, &args_v, "").unwrap().try_as_basic_value().unwrap_left()
             }
+            ExprKind::Field(_, _) => {
+                let field_ptr = self.emit_lvalue(e);
+                self.b.build_load(self.lower_ty(&e.ty), field_ptr, "").unwrap()
+            }
+        }
+    }
+
+    fn emit_lvalue(&mut self, e: &Expr) -> PointerValue<'a> {
+        match &e.kind {
+            ExprKind::Var(name) => {
+                match self.locals.get(name) {
+                    Some(place) => *place,
+                    None => panic!("can't assign to globals")
+                }
+            }
+            ExprKind::Field(obj, field) => {
+                let obj_v = self.emit_expr(obj).into_pointer_value();
+                let struct_ty = self.user_type_structs[obj.ty.get_struct()];
+                let field_n = obj.ty.get_struct().get().fields.iter().position(|x| &x.0 == field).unwrap();
+                self.b.build_struct_gep(struct_ty, obj_v, field_n as _, "").unwrap()
+            }
+            _ => unreachable!()
         }
     }
 

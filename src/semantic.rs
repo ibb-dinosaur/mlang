@@ -31,6 +31,7 @@ impl SemanticPreTypingChecker {
         for f in &mut p.functions {
             self.infer_function_return_type(f);
             self.check_function_returns(f);
+            self.check_assignment_lhs(&f.body);
         }
     }
 
@@ -60,6 +61,25 @@ impl SemanticPreTypingChecker {
             // if function type is void, insert implicit return at the end
             f.body.push(Statement::Return(
                 ExprKind::Literal(crate::ast::Literal::Void).expr_typed(Ty::Void)));
+        }
+    }
+
+    fn check_assignment_lhs(&mut self, stmts: &[Statement]) {
+        for s in stmts {
+            match s {
+                Statement::Assign(lhs, _) => {
+                    // valid lhs: variable, field
+                    match lhs.kind {
+                        ExprKind::Var(_) | ExprKind::Field(_, _) => {},
+                        _ => panic!("invalid left-hand side of assignment")
+                    }
+                },
+                Statement::If(_, then_, else_) => {
+                    self.check_assignment_lhs(then_);
+                    self.check_assignment_lhs(else_);
+                },
+                _ => {}
+            }
         }
     }
 }

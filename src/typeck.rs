@@ -198,10 +198,10 @@ impl TypeChecker {
                 // save the typevar assigned to this variable
                 expr.set_extra(var_ty);
             }
-            Statement::Assign(name, expr) => {
+            Statement::Assign(lhs, expr) => {
+                self.check_expr(lhs);
                 self.check_expr(expr);
-                let var_ty = self.vars.get(name).unwrap();
-                self.ctx.add_pair(expr.ty.clone(), var_ty.clone());
+                self.ctx.add_pair(expr.ty.clone(), lhs.ty.clone());
             }
             Statement::If(cond, then_, else_) => {
                 self.check_expr(cond);
@@ -274,6 +274,16 @@ impl TypeChecker {
                 }
                 *expr_type = ty.clone();
             }
+            ExprKind::Field(obj, field) => {
+                self.check_expr(obj);
+                // TODO: improve unification to support fields
+                if let Ty::UserTy(td) = &obj.ty {
+                    match td.get().fields.iter().find(|f| f.0 == *field) {
+                        None => panic!("invalid field access"),
+                        Some(f) => *expr_type = f.1.clone()
+                    }
+                } else { todo!() }
+            }
         }
     }
 
@@ -302,12 +312,12 @@ impl TypeChecker {
                 // restore the type var assigned to this variable
                 let var_ty: Ty = expr.get_extra::<Ty>().unwrap().clone();
                 self.resolve_expr(expr);
-                insert_cast(expr, var_ty);
+                insert_cast(expr, self.get_resolved(&var_ty));
             }
-            Statement::Assign(name, expr) => {
+            Statement::Assign(lhs, expr) => {
                 self.resolve_expr(expr);
-                let var_ty = self.get_resolved(&self.vars[name.as_str()]);
-                insert_cast(expr, var_ty);
+                self.resolve_expr(lhs);
+                insert_cast(expr, lhs.ty.clone());
             }
             Statement::If(cond, then_, else_) => {
                 self.resolve_expr(cond);
@@ -379,6 +389,18 @@ impl TypeChecker {
                 }
                 let expected_type = self.get_resolved(expr_type);
                 *expr_type = ty.clone();
+                insert_cast(expr, expected_type);
+            }
+            ExprKind::Field(obj, field) => {
+                self.resolve_expr(obj);
+                let resolved_field_ty = match &obj.ty {
+                    Ty::UserTy(td) => {
+                        td.get().fields.iter().find(|f| f.0 == *field).unwrap().1.clone()
+                    }
+                    _ => panic!()
+                };
+                let expected_type = self.get_resolved(expr_type);
+                *expr_type = resolved_field_ty.clone();
                 insert_cast(expr, expected_type);
             }
             ExprKind::TypeCast(_, _) => unreachable!()
@@ -502,6 +524,9 @@ impl TypeLookup {
             ExprKind::New(ty, args) => {
                 args.iter_mut().for_each(|a| self.lookup_in_expr(a));
                 *ty = self.lookup_ty(ty);
+            }
+            ExprKind::Field(obj, _) => {
+                self.lookup_in_expr(obj);
             }
             ExprKind::TypeCast(_, _) => unreachable!()
         }

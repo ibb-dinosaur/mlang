@@ -45,7 +45,7 @@ pub enum ExprKind {
     TypeCast(TypeCastKind, Box<Expr>),
     Call(Box<Expr>, Vec<Expr>),
     New(Ty, Vec<Expr>),
-    //FunctionCall(String, Vec<Expr>),
+    Field(Box<Expr>, String),
     // Add more expression kinds as needed
 }
 
@@ -125,7 +125,7 @@ pub enum Statement {
     ExprStmt(Expr),       // Expression statement
     Return(Expr),         // Return statement
     Let(String, Expr),    // Variable declaration and assignment
-    Assign(String, Expr),
+    Assign(Expr, Expr),
     If(Expr, Vec<Statement>, Vec<Statement>)
 }
 
@@ -282,6 +282,10 @@ impl Expr {
                 }
                 write!(f, ")")
             }
+            ExprKind::Field(obj, field) => {
+                obj.display(f)?;
+                write!(f, ".{}", field)
+            }
         }
     }
 }
@@ -299,7 +303,8 @@ impl Statement {
                 e.display(f)
             }
             Statement::Assign(s, e) => {
-                write!(f, "{} = ", s)?;
+                s.display(f)?;
+                write!(f, " = ")?;
                 e.display(f)
             }
             Statement::If(cond, then_, else_) => {

@@ -63,7 +63,7 @@ Stmt: Statement = {
     IfStmt,
     "return" <e:Expr> => Statement::Return(e),
     "let" <name:ident> "=" <e:Expr> => Statement::Let(name, e),
-    <var:ident> "=" <e:Expr> => Statement::Assign(var, e),
+    <lhs:Expr> "=" <e:Expr> => Statement::Assign(lhs, e),
     <e:Expr> => Statement::ExprStmt(e)
 }
 
@@ -102,6 +102,7 @@ Factor: Expr = {
 Call: Expr = {
     <a:Atom> "(" <args:CommaList<Expr>> ")" => ExprKind::Call(Box::new(a), args).expr(),
     "new" <ty:ident> "(" <args:CommaList<Expr>> ")" => ExprKind::New(Ty::Named(ty), args).expr(),
+    <obj:Call> "." <field:ident> => ExprKind::Field(Box::new(obj), field).expr(),
     <a:Atom> => a,
 };
 
@@ -181,5 +182,6 @@ extern {
         "<=" => Token::Le,
         ">" => Token::Gt,
         ">=" => Token::Ge,
+        "." => Token::Dot,
     }
 }

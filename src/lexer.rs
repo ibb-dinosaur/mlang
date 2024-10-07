@@ -65,6 +65,8 @@ pub enum Token {
     Eq,
     #[token("!=")]
     Ne,
+    #[token(".")]
+    Dot,
 }
 
 pub type Spanned<Tok, Loc, Error> = Result<(Loc, Tok, Loc), Error>;

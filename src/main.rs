@@ -26,6 +26,9 @@ fn main() {
 
     println!("{}", f);
 
+    let tl = typeck::TypeLookup::new();
+    tl.lookup_all(&mut f);
+
     let mut sc = semantic::SemanticPreTypingChecker {};
     sc.check_all(&mut f);
 

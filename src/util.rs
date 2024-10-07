@@ -68,3 +68,19 @@ impl<K, V, Q: PartialEq<K>> Index<Q> for ScopedMap<K, V> {
         self.get(&index).unwrap()
     }
 }
+
+pub enum Either<L, R> { Left(L), Right(R) }
+
+impl<L, R> Either<L, R> {
+    pub fn collect_separate(i: impl Iterator<Item = Self>) -> (Vec<L>, Vec<R>) {
+        let mut l = vec![];
+        let mut r = vec![];
+        for x in i {
+            match x {
+                Either::Left(x) => l.push(x),
+                Either::Right(x) => r.push(x),
+            }
+        }
+        (l, r)
+    }
+}

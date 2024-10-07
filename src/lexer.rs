@@ -17,14 +17,6 @@ pub enum Token {
     KwReturn,
     #[token("let")]
     KwLet,
-    #[token("int")]
-    KwInt,
-    #[token("void")]
-    KwVoid,
-    #[token("bool")]
-    KwBool,
-    #[token("any")]
-    KwAny,
     #[token("true")]
     KwTrue,
     #[token("false")]
@@ -39,6 +31,8 @@ pub enum Token {
     KwEnd,
     #[token("then")]
     KwThen,
+    #[token("type")]
+    KwType,
     #[token("(")]
     LParen,
     #[token(")")]

@@ -1,3 +1,5 @@
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ty {
     Unk,
@@ -6,9 +8,11 @@ pub enum Ty {
     Bool,
     Any,
     Func(Box<Ty>, Box<[Ty]>),
+    UserTy(TypeDef),
     #[allow(clippy::enum_variant_names)]
     /// Used for type inference and checking
     TyVar(usize),
+    Named(String),
 }
 
 impl Ty {
@@ -16,13 +20,14 @@ impl Ty {
         matches!(self, Ty::TyVar(_))
     }
 
-    /// Simple types are: not type variables, not compound types
-    pub fn is_simple(&self) -> bool {
-        matches!(self, Ty::Int | Ty::Void | Ty::Bool | Ty::Any)
+    /// Primitive types
+    pub fn is_primitive(&self) -> bool {
+        matches!(self, Ty::Int | Ty::Void | Ty::Bool)
     }
 
-    pub fn is_func(&self) -> bool {
-        matches!(self, Ty::Func(_, _))
+    /// Nominal types
+    pub fn is_nominal(&self) -> bool {
+        self.is_primitive() || matches!(self, Ty::Named(_) | Ty::UserTy(_))
     }
 }
 
@@ -129,13 +134,58 @@ impl Function {
     }
 }
 
+#[derive(Debug)]
+pub struct TypeDefinition {
+    pub name: String,
+    pub fields: Vec<(String, Ty)>
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeDef(Rc<RefCell<TypeDefinition>>);
+
+impl TypeDef {
+    pub fn new(def: TypeDefinition) -> Self {
+        TypeDef(Rc::new(RefCell::new(def)))
+    }
+
+    pub fn get(&self) -> std::cell::Ref<'_, TypeDefinition> {
+        self.0.borrow()
+    }
+
+    pub fn get_mut(&self) -> std::cell::RefMut<'_, TypeDefinition> {
+        self.0.borrow_mut()
+    }
+}
+
+impl PartialEq for TypeDef {
+    fn eq(&self, other: &Self) -> bool {
+        // there should be only one instance of each type definition
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for TypeDef {}
+impl PartialOrd for TypeDef {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for TypeDef {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.as_ptr().cmp(&other.0.as_ptr())
+    }
+}
+
 pub struct Program {
     pub functions: Vec<Function>,
+    pub user_types: Vec<TypeDef>,
+    //pub type_map: HashMap<String, Ty>,
 }
 
 impl Program {
-    pub fn new() -> Self {
-        Program { functions: vec![] }
+    pub fn new(functions: Vec<Function>, user_types: Vec<TypeDefinition>) -> Self {
+        Program { functions, 
+            user_types: user_types.into_iter().map(TypeDef::new).collect(), 
+            /*type_map: HashMap::new()*/ }
     }
 }
 
@@ -178,6 +228,8 @@ impl std::fmt::Display for Ty {
                 }
                 write!(f, ") -> {})", ret)
             },
+            Ty::Named(s) => write!(f, "`{}`", s),
+            Ty::UserTy(ty) => write!(f, "{}", ty.get().name),
         }
     }
 }

@@ -65,11 +65,13 @@ struct TypeDescObj {
 }
 
 const OBJ_TAG_FUNC: usize = 1;
+const OBJ_TAG_USER_STRUCT: usize = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 union TypeDesc {
     func: FuncDesc,
+    struct_: StructDesc,
 }
 
 #[repr(C)]
@@ -77,4 +79,11 @@ union TypeDesc {
 struct FuncDesc {
     ret: TypeTag,
     params: [TypeTag; 0]
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct StructDesc {
+    name_hash: [u8; 8], // mostly for debugging
+    fields: [TypeTag; 0]
 }

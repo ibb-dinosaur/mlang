@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{collections::{BTreeMap, HashMap}, hash::Hasher};
 
 use inkwell::{attributes::{AttributeLoc}, basic_block::BasicBlock, builder::Builder, context::Context, module::Module, types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType, StructType, VoidType}, values::{AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue}, AddressSpace, IntPredicate};
 
@@ -13,7 +13,8 @@ pub struct Compiler<'a> {
     globals: HashMap<String, GlobalValue<'a>>,
     // all locals are `alloca`d
     locals: ScopedMap<String, PointerValue<'a>>,
-    obj_type_tags: BTreeMap<Ty, GlobalValue<'a>>
+    obj_type_tags: BTreeMap<Ty, GlobalValue<'a>>,
+    user_type_structs: BTreeMap<TypeDef, StructType<'a>>
 }
 
 pub struct PrimTypes<'a> {
@@ -47,10 +48,22 @@ impl<'a> Compiler<'a> {
         type_cast_fail_fn.add_attribute(AttributeLoc::Function, ctx.create_enum_attribute(38, 0)); // nounwind
         let cmp_any_fn = m.add_function("__cmp_any", bool.fn_type(&[any.into(), any.into()], false), None);
         cmp_any_fn.add_attribute(AttributeLoc::Function, ctx.create_enum_attribute(38, 0)); // nounwind
-        Self { ctx, m, b, tys: PrimTypes { int, c_void, any, ptr, bool }, builtins: Builtins { type_cast_fail_fn, cmp_any_fn }, globals: HashMap::new(), locals: ScopedMap::new(), obj_type_tags: BTreeMap::new() }
+        Self { ctx, m, b, tys: PrimTypes { int, c_void, any, ptr, bool }, builtins: Builtins { type_cast_fail_fn, cmp_any_fn }, globals: HashMap::new(), locals: ScopedMap::new(), obj_type_tags: BTreeMap::new(), user_type_structs: BTreeMap::new() }
     }
 
     pub fn emit_program(&mut self, p: &Program) {
+        // declare all user types
+        for td in &p.user_types {
+            let t = td.get();
+            let mut fields = vec![];
+            for (_, field_ty) in &t.fields {
+                fields.push(self.lower_ty(field_ty));
+            }
+            let s = self.ctx.struct_type(&fields, false);
+            self.user_type_structs.insert(td.clone(), s);
+            // also generate type tag
+            self.make_usertype_type_tag(td);
+        }
         // declare all functions
         for f in &p.functions {
             let argtys = f.params.iter().map(|(_, ty)| self.lower_ty(ty).into()).collect::<Vec<BasicMetadataTypeEnum<'_>>>();
@@ -271,7 +284,8 @@ impl<'a> Compiler<'a> {
             Ty::Bool => self.tys.bool.into(),
             Ty::Any => self.tys.any.into(),
             Ty::Func(_, _) => self.tys.ptr.into(),
-            Ty::Unk | Ty::TyVar(_) => unreachable!(),
+            Ty::UserTy(_) => self.tys.ptr.into(),
+            Ty::Unk | Ty::TyVar(_) | Ty::Named(_) => unreachable!(),
         }
     }
 
@@ -288,7 +302,9 @@ impl<'a> Compiler<'a> {
                     self.make_func_type_tag(ty)
                 }
             },
-            Ty::Unk | Ty::TyVar(_) => unreachable!()            
+            Ty::UserTy(_) =>
+                self.obj_type_tags.get(ty).unwrap().as_pointer_value().const_to_int(self.tys.int),
+            Ty::Unk | Ty::TyVar(_) | Ty::Named(_) => unreachable!()            
         }
     }
 
@@ -309,6 +325,22 @@ impl<'a> Compiler<'a> {
         g.as_pointer_value().const_to_int(self.tys.int)
     }
 
+    fn make_usertype_type_tag(&mut self, td: &TypeDef) -> IntValue<'a> {
+        let t = td.get();
+        let size = t.fields.len() as u32 + 3;
+        let arr_ty = self.tys.int.array_type(size);
+        let g = self.m.add_global(arr_ty, None, format!("objtag.{}", t.name).as_str());
+        debug_assert!(self.obj_type_tags.insert(Ty::UserTy(td.clone()), g).is_none());
+        let mut obj = vec![self.tys.int.const_int(2, false)];
+        obj.push(self.tys.int.const_int(name_hash(&t.name), false));
+        for field in &t.fields {
+            obj.push(self.get_type_tag(&field.1));
+        }
+        obj.push(self.tys.int.const_zero()); // terminator
+        g.set_initializer(&self.tys.int.const_array(&obj));
+        g.as_pointer_value().const_to_int(self.tys.int)
+    }
+
     /// Convert a value to an i64 payload for the `any` type
     fn convert_val_to_any_payload(&mut self, val: BasicValueEnum<'a>, val_ty: &Ty) -> IntValue<'a> {
         match val_ty {
@@ -318,7 +350,8 @@ impl<'a> Compiler<'a> {
                 self.b.build_int_z_extend(val.into_int_value(), self.tys.int, "").unwrap(),
             Ty::Func(_, _) => // ptr -> i64
                 self.b.build_ptr_to_int(val.into_pointer_value(), self.tys.int, "").unwrap(),
-            Ty::Any | Ty::Unk | Ty::TyVar(_) => unreachable!(),
+            Ty::UserTy(_) => todo!(),
+            Ty::Any | Ty::Unk | Ty::TyVar(_) | Ty::Named(_) => unreachable!(),
         }
     }
 
@@ -331,7 +364,8 @@ impl<'a> Compiler<'a> {
                 self.b.build_int_truncate(payload, self.tys.bool, "").unwrap().into(),
             Ty::Func(_, _) => // i64 -> ptr
                 self.b.build_int_to_ptr(payload, self.tys.ptr, "").unwrap().into(),
-            Ty::Any | Ty::Unk | Ty::TyVar(_) => unreachable!(),
+            Ty::UserTy(_) => todo!(),
+            Ty::Any | Ty::Unk | Ty::TyVar(_) | Ty::Named(_) => unreachable!(),
         }
     }
 
@@ -347,7 +381,8 @@ impl<'a> Compiler<'a> {
                 self.b.build_int_compare(IntPredicate::EQ, lhs.into_pointer_value(), rhs.into_pointer_value(), "iseq").unwrap(),
             Ty::Any => // call a runtime function
                 self.b.build_call(self.builtins.cmp_any_fn, &[lhs.into(), rhs.into()], "iseq").unwrap().try_as_basic_value().unwrap_left().into_int_value(),
-            Ty::Unk | Ty::TyVar(_) => unreachable!(),
+            Ty::UserTy(_) => todo!(),
+            Ty::Unk | Ty::TyVar(_) | Ty::Named(_) => unreachable!(),
         }
     }
 }
@@ -367,4 +402,11 @@ fn set_function_prefix_data<'a>(f: FunctionValue<'a>, data: impl BasicValue<'a>)
     let data = data.as_value_ref();
     let fptr = f.as_value_ref();
     unsafe { crate::llvm_extras::LLVMSetPrefixData(fptr, data); }
+}
+
+/// Reproducible hash function for strings
+fn name_hash(s: &str) -> u64 {
+    let mut h = fnv::FnvHasher::default();
+    h.write(s.as_bytes());
+    h.finish()
 }

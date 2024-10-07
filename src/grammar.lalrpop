@@ -1,12 +1,27 @@
 use crate::ast::*;
 use crate::lexer::*;
+use crate::util::Either;
 
 grammar;
 
 pub Prog: Program = {
-    nl* <functions:Func*> => Program { functions }
+    nl* <definitions:Def*> => {
+        let (tys, fns) = Either::collect_separate(definitions.into_iter());
+        Program::new(fns, tys)
+    }
 }
 
+Def: Either<TypeDefinition, Function> = {
+    <t:TypeDef> => Either::Left(t),
+    <f:Func> => Either::Right(f),
+}
+
+TypeDef: TypeDefinition = {
+    "type" <name:ident> "=" nl <fields:(<Param> nl)*> "end" nl* => {
+        TypeDefinition { name, fields }
+    }
+}
+ 
 Func: Function = {
     "fun" <name:ident> "(" <params:CommaList<Param>> ")" <ret: (":" <TyExpr>)?> <body:FuncBody> nl* => {
         Function {
@@ -29,10 +44,7 @@ Param: (String, Ty) = {
 }
 
 TyName: Ty = {
-    "int" => Ty::Int,
-    "void" => Ty::Void,
-    "bool" => Ty::Bool,
-    "any" => Ty::Any,
+    <n:ident> => Ty::Named(n),
     "(" <TyExpr> ")"
 }
 
@@ -144,10 +156,6 @@ extern {
         "fun" => Token::KwFun,
         "return" => Token::KwReturn,
         "let" => Token::KwLet,
-        "int" => Token::KwInt,
-        "void" => Token::KwVoid,
-        "any" => Token::KwAny,
-        "bool" => Token::KwBool,
         "true" => Token::KwTrue,
         "false" => Token::KwFalse,
         "if" => Token::KwIf,
@@ -155,6 +163,7 @@ extern {
         "elseif" => Token::KwElseif,
         "then" => Token::KwThen,
         "end" => Token::KwEnd,
+        "type" => Token::KwType,
         "(" => Token::LParen,
         ")" => Token::RParen,
         ":" => Token::Colon,

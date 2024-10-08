@@ -9,6 +9,7 @@ mod lexer;
 lalrpop_mod!(grammar);
 mod parser;
 mod typeck;
+mod tyunify;
 mod semantic;
 mod compile;
 mod rt;

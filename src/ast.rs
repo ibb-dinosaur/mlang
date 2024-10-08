@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ty {
@@ -146,6 +146,16 @@ impl Function {
 pub struct TypeDefinition {
     pub name: String,
     pub fields: Vec<(String, Ty)>
+}
+
+impl TypeDefinition {
+    pub fn get_field_ty(&self, field: &str) -> Option<Ty> {
+        self.fields.iter().find_map(|(name, ty)| if name == field { Some(ty.clone()) } else { None })
+    }
+
+    pub fn get_field_idx(&self, field: &str) -> Option<usize> {
+        self.fields.iter().position(|(name, _)| name == field)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -299,7 +309,7 @@ impl Statement {
                 e.display(f)
             },
             Statement::Let(s, e) => {
-                write!(f, "let {} = ", s)?;
+                write!(f, "let {}: {} = ", s, e.ty)?;
                 e.display(f)
             }
             Statement::Assign(s, e) => {

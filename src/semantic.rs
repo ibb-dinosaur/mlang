@@ -57,7 +57,7 @@ impl SemanticPreTypingChecker {
             } else {
                 panic!("function {} missing return statement", f.name);
             }
-        } else {
+        } else if !matches!(f.body.last(), Some(Statement::Return(_))) {
             // if function type is void, insert implicit return at the end
             f.body.push(Statement::Return(
                 ExprKind::Literal(crate::ast::Literal::Void).expr_typed(Ty::Void)));

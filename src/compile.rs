@@ -292,7 +292,7 @@ impl<'a> Compiler<'a> {
             ExprKind::Field(obj, field) => {
                 let obj_v = self.emit_expr(obj).into_pointer_value();
                 let struct_ty = self.user_type_structs[obj.ty.get_struct()];
-                let field_n = obj.ty.get_struct().get().fields.iter().position(|x| &x.0 == field).unwrap();
+                let field_n = obj.ty.get_struct().get().get_field_idx(field).unwrap();
                 self.b.build_struct_gep(struct_ty, obj_v, field_n as _, "").unwrap()
             }
             _ => unreachable!()

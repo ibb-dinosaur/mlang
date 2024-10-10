@@ -3,11 +3,12 @@ use std::ops::Index;
 pub struct ScopedMap<K, V> {
     scope: usize,
     map: Vec<(K, V, usize)>,
+    allow_shadowing: bool,
 }
 
 impl<K, V> ScopedMap<K, V> {
-    pub fn new() -> Self {
-        ScopedMap { scope: 0, map: vec![] }
+    pub fn new(allow_shadowing: bool) -> Self {
+        ScopedMap { scope: 0, map: vec![], allow_shadowing }
     }
 
     fn is_defined_in_current_scope<Q: PartialEq<K>>(&self, key: &Q) -> bool {
@@ -50,8 +51,10 @@ impl<K, V> ScopedMap<K, V> {
 
 impl<K: Eq, V> ScopedMap<K, V> {
     pub fn insert_new(&mut self, key: K, value: V) {
-        if self.is_defined_in_current_scope(&key) {
+        if self.allow_shadowing && self.is_defined_in_current_scope(&key) {
             panic!("symbol already defined in current scope");
+        } else if !self.allow_shadowing && self.get(&key).is_some() {
+            panic!("symbol already defined");
         }
         self.map.push((key, value, self.scope));
     }

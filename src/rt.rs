@@ -1,6 +1,8 @@
 //! Runtime types and functions
 #![allow(unused)]
 
+use crate::allocator::Allocator;
+
 /// The `any` type
 /// 16 bytes, first word = tag, second word = actual value (can be scalar or pointer)
 /// The any_tag is different(!) from the type tag
@@ -27,6 +29,7 @@ const ANY_TAG_PTR_START: usize = 16;
 
 #[cold]
 extern "C" fn __tc_fail1(expected_ty: usize, actual_ty: usize, payload: usize) -> ! {
+    // note: panicking across FFI boundaries is UB
     panic!("runtime error: implicit type cast failed")
 }
 
@@ -39,6 +42,7 @@ extern "C" fn __cmp_any(a: AnyT, b: AnyT) -> bool {
         ANY_TAG_VOID => true,
         // pointer equality
         ANY_TAG_COMFUN => a.value == b.value,
+        // note: panicking across FFI boundaries is UB
         _ => panic!("internal error: unknown any tag")
     }
 }
@@ -86,4 +90,47 @@ struct FuncDesc {
 struct StructDesc {
     name_hash: [u8; 8], // mostly for debugging
     fields: [TypeTag; 0]
+}
+
+#[allow(unused)]
+extern "C" fn __rcdup(ptr: *mut u8) { unsafe {
+    // note: this function is not called directly, instead LLVM IR is generated
+    // however its correctness depends on the allocator module
+    // the expected LLVM IR is:
+    // %0 = getelementptr inbounds i8, ptr %ptr, i64 -4
+    // %1 = load i32, ptr %0, align 4
+    // %2 = add i32 %1, 1
+    // store i32 %2, ptr %0, align 4
+    Allocator::inc_refcount(ptr);
+} }
+
+#[allow(unused)]
+extern "C" fn __rcdrop(ptr: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) { unsafe {
+    // note: this function is not called directly, instead LLVM IR is generated
+    // the expected LLVM IR is:
+    /*
+    %0 = getelementptr inbounds i8, ptr %ptr, i64 -4
+    %1 = load i32, ptr %0, align 4
+    %2 = add i32 %1, -1
+    store i32 %2, ptr %0, align 4
+    %3 = icmp eq i32 %2, 0
+    br i1 %3, label %calldtor, label %continue
+
+    calldtor:
+    call void %dtor(ptr noundef nonnull %ptr) #3
+    br label %continue
+
+    continue:
+     */
+    if Allocator::dec_and_read_refcount(ptr) == 0 {
+        dtor(ptr);
+    }
+} }
+
+extern "C" fn __allocm(size: u64) -> *mut u8 {
+    todo!()
+}
+
+extern "C" fn __freem(ptr: *mut u8, size: u64) {
+    todo!()
 }

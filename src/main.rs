@@ -15,6 +15,7 @@ mod compile;
 mod rt;
 mod llvm_extras;
 mod util;
+mod refcountpass;
 //mod gccjit;
 //mod mir;
 
@@ -38,6 +39,10 @@ fn main() {
 
     println!("{}", f);
     //println!("{:?}", tc);
+
+    let mut rcp = refcountpass::RefCountPass::new();
+    rcp.run(&mut f);
+    println!("{}", f);
 
     let llvm_ctx = inkwell::context::Context::create();
     let mut c = Compiler::new(&llvm_ctx);

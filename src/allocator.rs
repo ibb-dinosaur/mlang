@@ -1,4 +1,4 @@
-/*use memmap2::{MmapMut, MmapOptions};
+use memmap2::{MmapMut, MmapOptions};
 
 pub struct Allocator {
     memory_start: *mut u8,
@@ -7,20 +7,23 @@ pub struct Allocator {
     mmap: Option<MmapMut>,
 }
 
+bitflags::bitflags! {
+    struct BlkStatus: u8 {
+        const TAIL = 0b01;
+        const USED = 0b10;
+    }
+}
+
 #[repr(C)]
 struct BlockHeader {
     /// 0 for normal blocks, 1 for the final block
-    status: u8,
-    _pad: [u8; 3],
-    /// Magic number (for debugging), should be 0x4A21
-    checknum: u16,
-    /// For garbage collection
-    mark: u8,
-    /// (0=free, 1=used)
-    used: u8,
-    /// 0 for the first block
-    prev_size: u32,
-    size: u32,
+    status: BlkStatus,
+    /// Magic number (for debugging), should be 0x[12,4A,21]
+    checknum: [u8; 3],
+    /// XOR of size and prev_size
+    xor_size: u32,
+    _pad: [u8; 4],
+    refcount: u32,
 }
 
 const _: [(); 16] = [(); std::mem::size_of::<BlockHeader>()];
@@ -34,14 +37,15 @@ impl BlockPtr {
         Self(ptr as *mut BlockHeader)
     }
 
+    fn from_content_ptr(ptr: *mut u8) -> Self {
+        Self(unsafe { ptr.sub(16) } as *mut BlockHeader)
+    }
+
     fn init(&self, size: u32, prev_size: u32, tail: bool) {
         unsafe {
-            (*self.0).status = tail as u8;
-            (*self.0).checknum = 0x4A21;
-            (*self.0).mark = 0;
-            (*self.0).used = 0;
-            (*self.0).prev_size = prev_size;
-            (*self.0).size = size;
+            (*self.0).status = if tail { BlkStatus::TAIL } else { BlkStatus::empty() };
+            (*self.0).checknum = [0x12, 0x4A, 0x21];
+            (*self.0).xor_size = size ^ prev_size;
         }
     }
 
@@ -51,30 +55,43 @@ impl BlockPtr {
             debug_assert!(self.0 as usize >= a.memory_start as usize);
             debug_assert!((self.0 as usize) < a.memory_end as usize);
         }
-        debug_assert!(unsafe { (*self.0).checknum } == 0x4A21);
-        debug_assert!(unsafe { (*self.0).size } % 8 == 0);
-        debug_assert!(unsafe { (*self.0).prev_size } % 8 == 0);
+        debug_assert!(unsafe { (*self.0).checknum } == [0x12, 0x4A, 0x21]);
+        debug_assert!(unsafe { (*self.0).xor_size } % 8 == 0);
     }
 
-    fn next(&self) -> Self {
+    /// Return the block pointer and its size
+    fn next(&self, size: u32) -> (Self, u32) {
         if self.is_tail() { panic!() }
-        Self(unsafe { self.0.byte_add((*self.0).size as usize) })
+        let ptr = Self(unsafe { self.0.byte_add(size as usize) });
+        let s = unsafe { (*self.0).xor_size ^ size };
+        (ptr, s)
     }
 
-    fn prev(&self) -> Self {
-        if self.is_head() { panic!() }
-        Self(unsafe { self.0.byte_sub((*self.0).prev_size as usize) })
+    /// Return the block pointer and its size
+    fn prev(&self, size: u32) -> (Self, u32) {
+        if self.is_head(size) { panic!() }
+        let s = self.prev_size(size);
+        let ptr = Self(unsafe { self.0.byte_sub(s as usize) });
+        (ptr, s)
     }
 
-    fn is_head(&self) -> bool {
-        unsafe { (*self.0).prev_size == 0 }
+    fn prev_size(&self, size: u32) -> u32 {
+        unsafe { (*self.0).xor_size ^ size }
+    }
+
+    fn is_head(&self, size: u32) -> bool {
+        self.prev_size(size) == 0
     }
 
     fn is_tail(&self) -> bool {
-        unsafe { (*self.0).status == 1 }
+        unsafe { (*self.0).status.contains(BlkStatus::TAIL) }
     }
 
-    fn print_info(&self) {
+    fn is_used(&self) -> bool {
+        unsafe { (*self.0).status.contains(BlkStatus::USED) }
+    }
+
+    fn print_info(&self, size: u32) {
         fn fmt_num(n: u32) -> String {
             if n >= 1_000_000 {
                 format!("{:>5.1}M", n as f64 / 1_000_000.0)
@@ -85,26 +102,26 @@ impl BlockPtr {
             }
         }
 
-        println!("{:p} {:>5} {}{}{}",
+        println!("{:p} {:>5} {}{}",
             self.0, 
-            fmt_num(unsafe { (*self.0).size }),
-            if unsafe { (*self.0).used } == 1 { "U" } else { " " },
-            if unsafe { (*self.0).mark } == 1 { "M" } else { " " },
-            if unsafe { (*self.0).status } == 1 { "T" } else if unsafe { (*self.0).prev_size } == 0 { "H" } else { "" },
+            fmt_num(size),
+            if self.is_used() { "U" } else { " " },
+            //if unsafe { (*self.0).mark } == 1 { "M" } else { " " },
+            if self.is_tail() { "T" } else if self.is_head(size) { "H" } else { " " },
         );
     }
 
-    fn split(&self, size_first: u32) -> (Self, Self) { unsafe {
+    fn split(&self, this_size: u32, size_first: u32) -> (Self, Self) { unsafe {
         debug_assert!(size_first % 8 == 0);
-        debug_assert!((*self.0).size >= size_first + 16);
-        debug_assert!((*self.0).used == 0, "splitting a used block");
-        let size_second = (*self.0).size - size_first - 16;
-        (*self.0).size = size_first;
-        let second = BlockPtr(self.0.byte_add(size_first as usize)); 
+        debug_assert!(this_size >= size_first + 32);
+        debug_assert!(!self.is_used(), "splitting a used block");
+        let size_second = this_size - size_first - 16;
+        (*self.0).xor_size ^= this_size ^ size_first;
+        let second = BlockPtr(self.0.byte_add(size_first as usize + 16));
         second.init(size_second, size_first, false);
-        if (*self.0).status == 1 {
-            (*self.0).status = 0;
-            (*second.0).status = 1;
+        if self.is_tail() {
+            (*self.0).status.remove(BlkStatus::TAIL);
+            (*second.0).status.insert(BlkStatus::TAIL);
         }
         (*self, second)
     } }
@@ -113,16 +130,23 @@ impl BlockPtr {
         unsafe { (self.0 as *mut u8).add(16) }
     }
 
-    fn size(&self) -> u32 { unsafe { (*self.0).size } }
+    fn is_free(&self) -> bool { !self.is_used() }
 
-    fn is_free(&self) -> bool { unsafe { (*self.0).used == 0 } }
+    fn set_used(&self, used: bool) { unsafe { (*self.0).status.set(BlkStatus::USED, used); } }
 
-    fn set_used(&self, used: bool) { unsafe { (*self.0).used = used as u8 } }
+    /// Get the size of this block. Only valid if this is the first block which the allocator has to guarantee
+    unsafe fn get_size_if_head(&self) -> u32 {
+        (*self.0).xor_size // ^ 0
+    }
+
+    fn get_refcount(&self) -> u32 { unsafe { (*self.0).refcount } }
+    fn inc_refcount(&self) { unsafe { (*self.0).refcount += 1; } }
+    fn dec_refcount(&self) { unsafe { (*self.0).refcount -= 1; } }
 }
 
 impl Allocator {
     pub unsafe fn new(memory_start: *mut u8, memory_end: *mut u8) -> Self {
-        let mut allocator = Self { memory_start, memory_end, mmap: None };
+        let allocator = Self { memory_start, memory_end, mmap: None };
         allocator.init();
         allocator
     }
@@ -141,37 +165,51 @@ impl Allocator {
         let memory_size = self.memory_end as usize - self.memory_start as usize;
         debug_assert!(memory_size > 16);
         debug_assert!(memory_size < u32::MAX as usize);
-        self.head().init(memory_size as u32, 0, true);
+        BlockPtr::from(self.memory_start).init(memory_size as u32, 0, true);
     }
 
-    fn head(&self) -> BlockPtr {
-        BlockPtr::from(self.memory_start)
+    fn head(&self) -> (BlockPtr, u32) {
+        let ptr = BlockPtr::from(self.memory_start);
+        (ptr, unsafe { ptr.get_size_if_head() })
     }
 
     pub fn dump_debug(&self) {
-        let mut block = self.head();
+        let (mut block, mut block_size) = self.head();
         loop {
             block.validate(Some(self));
-            block.print_info();
+            block.print_info(block_size);
             if block.is_tail() { break }
-            block = block.next();
+            (block, block_size) = block.next(block_size);
         }
     }
 
-    pub fn alloc(&self, size: usize) -> Option<*mut u8> {
-        let size = (size + 15) & !15; // should we align to 8 or 16?
-        assert!(size < u32::MAX as usize);
+    pub fn alloc(&self, alloc_size: usize) -> Option<*mut u8> {
+        let alloc_size = (alloc_size + 15) & !15; // should we align to 8 or 16?
+        assert!(alloc_size < u32::MAX as usize);
         // walk the blocks looking for a free one
-        let mut block = self.head();
+        let (mut block, mut block_size) = self.head();
         loop {
-            if block.is_free() && block.size() >= (size as u32) {
-                let (alloc_block, _) = block.split(size as u32);
+            if block.is_free() && block_size >= (alloc_size as u32) {
+                let (alloc_block, _) = block.split(block_size, alloc_size as u32);
                 alloc_block.set_used(true);
                 return Some(alloc_block.content_ptr());
             }
             if block.is_tail() { break }
-            block = block.next();
+            (block, block_size) = block.next(block_size);
         }
         None
     }
-}*/
+
+    /// Safety: the pointer must have been allocated by this allocator
+    pub unsafe fn inc_refcount(ptr: *mut u8) {
+        let block = BlockPtr::from_content_ptr(ptr);
+        block.inc_refcount();
+    }
+    
+    /// Safety: the pointer must have been allocated by this allocator
+    pub unsafe fn dec_and_read_refcount(ptr: *mut u8) -> u32 {
+        let block = BlockPtr::from_content_ptr(ptr);
+        block.dec_refcount();
+        block.get_refcount()
+    }
+}

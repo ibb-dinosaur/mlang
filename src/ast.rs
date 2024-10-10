@@ -30,6 +30,11 @@ impl Ty {
         self.is_primitive() || matches!(self, Ty::Named(_) | Ty::UserTy(_))
     }
 
+    /// Managed types are types that are reference counted
+    pub fn is_managed(&self) -> bool {
+        matches!(self, Ty::UserTy(_) | Ty::Any)
+    }
+
     pub fn get_struct(&self) -> &TypeDef {
         match self {
             Ty::UserTy(ty) => ty,
@@ -46,6 +51,10 @@ pub enum ExprKind {
     Call(Box<Expr>, Vec<Expr>),
     New(Ty, Vec<Expr>),
     Field(Box<Expr>, String),
+    /// Duplicate the value (increase refcount)
+    RcDup(Box<Expr>),
+    /// Return the value and drop it AT THE END OF evaluation of current statement (the value may still be used in other expressions in this statement)
+    RcDrop(Box<Expr>),
     // Add more expression kinds as needed
 }
 
@@ -81,6 +90,13 @@ impl Expr {
 
     pub fn get_extra<T: 'static>(&self) -> Option<&T> {
         self.extra.as_ref().and_then(|b| b.downcast_ref())
+    }
+}
+
+// mostly to allow for std::mem::take 
+impl std::default::Default for Expr {
+    fn default() -> Self {
+        Expr { ty: Ty::Unk, kind: ExprKind::Literal(Literal::Void), extra: None }
     }
 }
 
@@ -126,7 +142,14 @@ pub enum Statement {
     Return(Expr),         // Return statement
     Let(String, Expr),    // Variable declaration and assignment
     Assign(Expr, Expr),
-    If(Expr, Vec<Statement>, Vec<Statement>)
+    If(Expr, Vec<Statement>, Vec<Statement>),
+    /// Drop expressions at the end of scope (block or function).
+    /// Must be the last statement in a block. (It should be the last statement of every block)
+    /// 
+    /// If `returns` is Some, then the return expression is evaluated first, then the expressions are dropped and then the function returns
+    ///
+    /// If `returns` is None, the expressions are dropped and the function does not return
+    RcDropsReturn { drops: Vec<Expr>, returns: Option<Box<Expr>> },
 }
 
 pub struct Function {
@@ -296,6 +319,16 @@ impl Expr {
                 obj.display(f)?;
                 write!(f, ".{}", field)
             }
+            ExprKind::RcDup(e) => {
+                write!(f, "dup(")?;
+                e.display(f)?;
+                write!(f, ")")
+            }
+            ExprKind::RcDrop(e) => {
+                write!(f, "drop(")?;
+                e.display(f)?;
+                write!(f, ")")
+            }
         }
     }
 }
@@ -333,6 +366,19 @@ impl Statement {
                     }
                 }
                 write!(f, "}}")
+            }
+            Statement::RcDropsReturn { drops, returns } => {
+                if let Some(e) = returns {
+                    write!(f, "return ")?;
+                    e.display(f)?;
+                }
+                for (i, e) in drops.iter().enumerate() {
+                    write!(f, ";")?;
+                    write!(f, "drop(")?;
+                    e.display(f)?;
+                    write!(f, ")")?;
+                }
+                Ok(())
             }
         }
     }

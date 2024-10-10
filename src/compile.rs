@@ -22,6 +22,7 @@ pub struct PrimTypes<'a> {
     any: StructType<'a>,
     ptr: PointerType<'a>,
     bool: IntType<'a>,
+    int32: IntType<'a>,
 }
 
 impl<'a> Compiler<'a> {
@@ -34,7 +35,8 @@ impl<'a> Compiler<'a> {
         let ptr = ctx.ptr_type(AddressSpace::default());
         let bool = ctx.custom_width_int_type(1);
         let any = ctx.struct_type(&[int.into(), int.into()], false);
-        Self { ctx, m, b, tys: PrimTypes { int, c_void, any, ptr, bool }, globals: HashMap::new(), locals: ScopedMap::new(), obj_type_tags: BTreeMap::new(), user_type_structs: BTreeMap::new() }
+        let int32 = ctx.i32_type();
+        Self { ctx, m, b, tys: PrimTypes { int, c_void, any, ptr, bool, int32 }, globals: HashMap::new(), locals: ScopedMap::new(false), obj_type_tags: BTreeMap::new(), user_type_structs: BTreeMap::new() }
     }
 
     fn initialize_builtins(&mut self) {
@@ -51,6 +53,10 @@ impl<'a> Compiler<'a> {
         let alloc_fn = self.m.add_function("__allocm", 
             self.tys.ptr.fn_type(&[self.tys.int.into()], false), None);
         alloc_fn.add_attribute(AttributeLoc::Function, self.ctx.create_string_attribute("allockind", "alloc"));
+    
+        let free_fn = self.m.add_function("__freem",
+            self.tys.c_void.fn_type(&[self.tys.ptr.into(), self.tys.int.into()], false), None);
+        free_fn.add_attribute(AttributeLoc::Function, self.ctx.create_string_attribute("allockind", "free"));
     }
 
     pub fn emit_program(mut self, p: &Program) {
@@ -68,6 +74,7 @@ impl<'a> Compiler<'a> {
             self.make_usertype_type_tag(td);
             // and constructor
             self.emit_default_constructor(td);
+            self.emit_destructor(td);
         }
         // declare all functions
         for f in &p.functions {
@@ -116,28 +123,31 @@ impl<'a> Compiler<'a> {
     }
 
     fn emit_statement(&mut self, s: &Statement) {
+        let mut drops = vec![];
+        // return after drops
+        let mut late_return = None;
         match s {
             Statement::ExprStmt(expr) => {
-                self.emit_expr(expr);
+                self.emit_expr(expr, &mut drops);
             },
             Statement::Return(expr) => {
-                let val = self.emit_expr(expr);
+                let val = self.emit_expr(expr, &mut drops);
                 self.b.build_return(Some(&val)).unwrap();
             },
             Statement::Let(name, expr) => {
-                let val = self.emit_expr(expr);
+                let val = self.emit_expr(expr, &mut drops);
                 // allocate space
                 let place = self.b.build_alloca(self.lower_ty(&expr.ty), name).unwrap();
                 self.b.build_store(place, val).unwrap();
                 self.locals.insert(name.clone(), place);
             },
             Statement::Assign(lhs, expr) => {
-                let val = self.emit_expr(expr);
-                let place = self.emit_lvalue(lhs);
+                let val = self.emit_expr(expr, &mut drops);
+                let place = self.emit_lvalue(lhs, &mut drops);
                 self.b.build_store(place, val).unwrap();
             },
             Statement::If(cond, then_, else_) => {
-                let cond = self.emit_expr(cond);
+                let cond = self.emit_expr(cond, &mut drops);
                 let then_bb = self.new_bb("then");
                 let else_bb = self.new_bb("else");
                 let join_bb = self.new_bb("");
@@ -164,10 +174,28 @@ impl<'a> Compiler<'a> {
                 }
                 self.b.position_at_end(join_bb);
             },
+            Statement::RcDropsReturn { drops: drop_exprs, returns } => {
+                for e in drop_exprs {
+                    let val = self.emit_expr(e, &mut drops);
+                    drops.push((val, e.ty.clone()));
+                }
+                if let Some(expr) = returns {
+                    let val = self.emit_expr(expr, &mut drops);
+                    late_return = Some(val);
+                }
+            },
+        }
+        // drop all values that are no longer needed
+        for (val, ty) in drops {
+            self.build_drop(val, &ty);
+        }
+        if let Some(val) = late_return {
+            self.b.build_return(Some(&val)).unwrap();
         }
     }
 
-    fn emit_expr(&mut self, e: &Expr) -> BasicValueEnum<'a> {
+    /// `drops` is a list of values that will be dropped at the end of current statement
+    fn emit_expr(&mut self, e: &Expr, drops: &mut Vec<(BasicValueEnum<'a>,Ty)>) -> BasicValueEnum<'a> {
         match &e.kind {
             ExprKind::Literal(Literal::Int(n)) => {
                 self.tys.int.const_int(*n as u64, false).into()
@@ -192,8 +220,8 @@ impl<'a> Compiler<'a> {
             },
             ExprKind::BinOp(op, lhs, rhs) => {
                 if op.is_eq_comparison() {
-                    let lhs_v = self.emit_expr(lhs);
-                    let rhs_v = self.emit_expr(rhs);
+                    let lhs_v = self.emit_expr(lhs, drops);
+                    let rhs_v = self.emit_expr(rhs, drops);
                     let cmp = self.build_eq_comparison(&lhs.ty, lhs_v, rhs_v);
                     if *op == BinOp::CmpNe {
                         // not
@@ -202,8 +230,8 @@ impl<'a> Compiler<'a> {
                         cmp
                     }.into()
                 } else {
-                    let lhs = self.emit_expr(lhs).into_int_value();
-                    let rhs = self.emit_expr(rhs).into_int_value();
+                    let lhs = self.emit_expr(lhs, drops).into_int_value();
+                    let rhs = self.emit_expr(rhs, drops).into_int_value();
                     match op {
                         BinOp::Add => self.b.build_int_add(lhs, rhs, "").unwrap().into(),
                         BinOp::Sub => self.b.build_int_sub(lhs, rhs, "").unwrap().into(),
@@ -217,7 +245,7 @@ impl<'a> Compiler<'a> {
                 }
             },
             ExprKind::TypeCast(type_cast_kind, expr) => {
-                let val = self.emit_expr(expr);
+                let val = self.emit_expr(expr, drops);
                 match type_cast_kind {
                     TypeCastKind::ToAny => {
                         let type_tag = any_tag_of_type(&expr.ty);
@@ -251,9 +279,9 @@ impl<'a> Compiler<'a> {
                 }
             },
             ExprKind::Call(callee_e, args_e) => {
-                let callee = self.emit_expr(callee_e).into_pointer_value();
+                let callee = self.emit_expr(callee_e, drops).into_pointer_value();
                 let mut args: Vec<BasicMetadataValueEnum<'a>> = vec![];
-                for arg_e in args_e { args.push(self.emit_expr(arg_e).into()); }
+                for arg_e in args_e { args.push(self.emit_expr(arg_e, drops).into()); }
                 if callee.as_any_value_enum().is_function_value() {
                     // direct call
                     let callee = callee.as_any_value_enum().into_function_value();
@@ -269,19 +297,29 @@ impl<'a> Compiler<'a> {
             ExprKind::New(ty, args) => {
                 let mut args_v = Vec::<BasicMetadataValueEnum<'_>>::new();
                 for arg in args {
-                    args_v.push(self.emit_expr(arg).into());
+                    args_v.push(self.emit_expr(arg, drops).into());
                 }
                 let constructor = self.m.get_function(&format!("{}.ctor", ty.get_struct().get().name)).unwrap();
                 self.b.build_call(constructor, &args_v, "").unwrap().try_as_basic_value().unwrap_left()
             }
             ExprKind::Field(_, _) => {
-                let field_ptr = self.emit_lvalue(e);
+                let field_ptr = self.emit_lvalue(e, drops);
                 self.b.build_load(self.lower_ty(&e.ty), field_ptr, "").unwrap()
             }
+            ExprKind::RcDup(expr) => {
+                let val = self.emit_expr(expr, drops);
+                self.build_dup(val, &expr.ty);
+                val
+            },
+            ExprKind::RcDrop(expr) => {
+                let val = self.emit_expr(expr, drops);
+                drops.push((val, expr.ty.clone()));
+                val
+            },
         }
     }
 
-    fn emit_lvalue(&mut self, e: &Expr) -> PointerValue<'a> {
+    fn emit_lvalue(&mut self, e: &Expr, drops: &mut Vec<(BasicValueEnum<'a>,Ty)>) -> PointerValue<'a> {
         match &e.kind {
             ExprKind::Var(name) => {
                 match self.locals.get(name) {
@@ -290,10 +328,17 @@ impl<'a> Compiler<'a> {
                 }
             }
             ExprKind::Field(obj, field) => {
-                let obj_v = self.emit_expr(obj).into_pointer_value();
+                let obj_v = self.emit_expr(obj, drops).into_pointer_value();
                 let struct_ty = self.user_type_structs[obj.ty.get_struct()];
                 let field_n = obj.ty.get_struct().get().get_field_idx(field).unwrap();
                 self.b.build_struct_gep(struct_ty, obj_v, field_n as _, "").unwrap()
+            }
+            ExprKind::RcDrop(expr) => {
+                let val = self.emit_lvalue(expr, drops);
+                // lvalue is a pointer to the value, so we have to load it
+                let val_loaded = self.b.build_load(self.lower_ty(&expr.ty), val, "").unwrap();
+                drops.push((val_loaded, expr.ty.clone()));
+                val
             }
             _ => unreachable!()
         }
@@ -436,6 +481,65 @@ impl<'a> Compiler<'a> {
             self.b.build_store(field, arg).unwrap();
         }
         self.b.build_return(Some(&obj)).unwrap();
+    }
+
+    fn emit_destructor(&mut self, td: &TypeDef) {
+        let t = td.get();
+        let struct_ty = *self.user_type_structs.get(td).unwrap();
+        let fty = self.tys.c_void.fn_type(&[self.tys.ptr.into()], false);
+        let f = self.m.add_function(&format!("{}.dtor", t.name), fty, None);
+        let entry_bb = self.ctx.append_basic_block(f, "entry");
+        self.b.position_at_end(entry_bb);
+        let alloc_size = struct_ty.size_of().unwrap();
+        let obj = f.get_first_param().unwrap().into_pointer_value();
+        // drop all fields
+        for i in 0..t.fields.len() {
+            let field_ty = &t.fields[i].1;
+            if !field_ty.is_managed() { continue }
+            let field = self.b.build_struct_gep(struct_ty, obj, i as u32, "").unwrap();
+            let val = self.b.build_load(self.lower_ty(field_ty), field, "").unwrap();
+            self.build_drop(val, field_ty);
+        }
+        // deallocate
+        self.b.build_call(self.m.get_function("__freem").unwrap(),
+            &[obj.into(), alloc_size.into()], "").unwrap();
+        self.b.build_return(None).unwrap();
+    }
+
+    fn build_dup(&mut self, v: BasicValueEnum<'a>, ty: &Ty) {
+        if !ty.is_managed() { return }
+        if let Ty::UserTy(_) = ty {
+            // LLVM code as described in [`rt::__rcdup`]
+            let refcount_ptr = unsafe { self.b.build_in_bounds_gep(self.tys.int32, v.into_pointer_value(), &[self.tys.int.const_int(-1isize as _, true)], "").unwrap() };
+            let refcount = self.b.build_load(self.tys.int32, refcount_ptr, "").unwrap();
+            let new_refcount = self.b.build_int_add(refcount.into_int_value(), self.tys.int32.const_int(1, false), "").unwrap();
+            self.b.build_store(refcount_ptr, new_refcount).unwrap();
+        } else if ty == &Ty::Any {
+            todo!()
+        } else { unreachable!() }
+    }
+
+    fn build_drop(&mut self, v: BasicValueEnum<'a>, ty: &Ty) {
+        if !ty.is_managed() { return }
+        if let Ty::UserTy(td) = ty {
+            let refcount_ptr = unsafe { self.b.build_in_bounds_gep(self.tys.int32, v.into_pointer_value(), &[self.tys.int.const_int(-1isize as _, true)], "").unwrap() };
+            let refcount = self.b.build_load(self.tys.int32, refcount_ptr, "").unwrap();
+            let new_refcount = self.b.build_int_add(refcount.into_int_value(), self.tys.int32.const_int(-1isize as _, true), "").unwrap();
+            self.b.build_store(refcount_ptr, new_refcount).unwrap();
+            let cmp = self.b.build_int_compare(IntPredicate::EQ, new_refcount, self.tys.int32.const_zero(), "").unwrap();
+            let dtor_call_bb = self.new_bb("dtorcall");
+            let continue_bb = self.new_bb("");
+            self.b.build_conditional_branch(cmp, dtor_call_bb, continue_bb).unwrap();
+            // 
+            self.b.position_at_end(dtor_call_bb);
+            let dtor = self.m.get_function(format!("{}.dtor", td.get().name).as_str()).unwrap();
+            self.b.build_call(dtor, &[v.into()], "").unwrap();
+            self.b.build_unconditional_branch(continue_bb).unwrap();
+            //
+            self.b.position_at_end(continue_bb);
+        } else if ty == &Ty::Any {
+            todo!()
+        } else { unreachable!() }
     }
 }
 

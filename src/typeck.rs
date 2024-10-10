@@ -18,7 +18,7 @@ pub struct TypeChecker {
 
 impl TypeChecker {
     pub fn new() -> Self {
-        Self { globals: HashMap::new(), ctx: InferenceContext::new(), vars: ScopedMap::new() }
+        Self { globals: HashMap::new(), ctx: InferenceContext::new(), vars: ScopedMap::new(false) }
     }
 
     fn get_symbol_type(&self, name: &str) -> Ty {
@@ -108,6 +108,7 @@ impl TypeChecker {
                 }
                 self.vars.exit_scope();
             }
+            Statement::RcDropsReturn { .. } => unreachable!()
         }
     }
 
@@ -171,6 +172,8 @@ impl TypeChecker {
                 expected_ty = self.ctx.new_tyvar();
                 self.ctx.add_field(&obj.ty, field, &expected_ty);
             }
+            ExprKind::RcDup(_) => unreachable!(),
+            ExprKind::RcDrop(_) => unreachable!(),
         }
         self.ctx.add_assignable(&expected_ty, expr_type);
     }
@@ -214,6 +217,7 @@ impl TypeChecker {
                 }
                 self.vars.exit_scope();
             }
+            Statement::RcDropsReturn { .. } => unreachable!(),
         }
     }
 
@@ -281,7 +285,9 @@ impl TypeChecker {
                 };
                 value_type = resolved_field_ty;
             }
-            ExprKind::TypeCast(_, _) => unreachable!()
+            ExprKind::TypeCast(_, _) => unreachable!(),
+            ExprKind::RcDup(_) => unreachable!(),
+            ExprKind::RcDrop(_) => unreachable!(),
         }
         let expected_type = self.get_resolved(expr_type);
         *expr_type = value_type;
@@ -291,7 +297,7 @@ impl TypeChecker {
 
 // this is to get around the borrow checker
 fn insert_cast(e: &mut Expr, expected_ty: Ty) {
-    let expr = std::mem::replace(e, ExprKind::Literal(Literal::Void).expr()); // temporary expression
+    let expr = std::mem::take(e);
     *e = cast(expr, expected_ty);
 }
 
@@ -387,6 +393,7 @@ impl TypeLookup {
                 then_.iter_mut().for_each(|stmt| self.lookup_in_stmt(stmt));
                 else_.iter_mut().for_each(|stmt| self.lookup_in_stmt(stmt));
             }
+            Statement::RcDropsReturn { .. } => unreachable!(),
         }
     }
 
@@ -409,7 +416,9 @@ impl TypeLookup {
             ExprKind::Field(obj, _) => {
                 self.lookup_in_expr(obj);
             }
-            ExprKind::TypeCast(_, _) => unreachable!()
+            ExprKind::TypeCast(_, _) => unreachable!(),
+            ExprKind::RcDup(_) => unreachable!(),
+            ExprKind::RcDrop(_) => unreachable!(),
         }
     }
 }

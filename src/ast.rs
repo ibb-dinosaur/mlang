@@ -8,6 +8,7 @@ pub enum Ty {
     Bool,
     Any,
     Func(Box<Ty>, Box<[Ty]>),
+    #[allow(clippy::enum_variant_names)]
     UserTy(TypeDef),
     #[allow(clippy::enum_variant_names)]
     /// Used for type inference and checking
@@ -281,7 +282,14 @@ impl Expr {
             ExprKind::Literal(Literal::Void) => write!(f, "void"),
             ExprKind::Literal(Literal::Int(i)) => write!(f, "{}", i),
             ExprKind::Literal(Literal::Bool(b)) => write!(f, "{}", b),
-            ExprKind::Var(s) => write!(f, "{}:{}", s, self.ty),
+            ExprKind::Var(s) => {
+                if matches!(self.ty, Ty::Func(_, _)) {
+                    // don't print types for functions because it makes the output hard to read
+                    write!(f, "{}", s)
+                } else {
+                    write!(f, "{}:{}", s, self.ty)
+                }
+            },
             ExprKind::BinOp(op, lhs, rhs) => {
                 write!(f, "(")?;
                 lhs.display(f)?;

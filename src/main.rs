@@ -40,8 +40,9 @@ fn main() {
     println!("{}", f);
     //println!("{:?}", tc);
 
-    let mut rcp = refcountpass::RefCountPass::new();
+    let mut rcp = refcountpass::RefCountPass2::new();
     rcp.run(&mut f);
+    refcountpass::DropPropagationPass::run(&mut f);
     println!("{}", f);
 
     let llvm_ctx = inkwell::context::Context::create();

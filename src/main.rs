@@ -42,6 +42,8 @@ fn main() {
 
     let mut rcp = refcountpass::RefCountPass2::new();
     rcp.run(&mut f);
+    println!("{}", f);
+
     refcountpass::DropPropagationPass::run(&mut f);
     println!("{}", f);
 

@@ -7,187 +7,9 @@
 //! - Accessing a field of an object is _not_ a *use* of the object itself
 //! - When a reference to an object is lost (e.g. reassigning a variable), it must be *dropped*
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use crate::ast::{Expr, ExprKind, Function, Program, Statement, Ty};
-
-pub struct RefCountPass {
-    vars_uses: HashMap<String, usize>,
-    unused_vars: HashMap<String, Ty>
-}
-
-impl RefCountPass {
-    pub fn new() -> Self {
-        Self {
-            vars_uses: HashMap::new(),
-            unused_vars: HashMap::new()
-        }
-    }
-
-    pub fn run(&mut self, p: &mut Program) {
-        for f in &mut p.functions {
-            self.visit_function(f);
-        }
-    }
-
-    fn visit_function(&mut self, f: &mut Function) {
-        self.vars_uses.clear();
-        self.unused_vars.clear();
-        for p in &f.params {
-            self.unused_vars.insert(p.0.clone(), p.1.clone());
-        }
-
-        for s in &f.body {
-            self.find_used_variables_stmt(s);
-        }
-        // now we have a map of variables and their usage count
-        // insert refcount operations
-        for s in &mut f.body {
-            self.insert_refcount_ops_stmt(s);
-        }
-    }
-
-    fn insert_refcount_ops_stmt(&mut self, s: &mut Statement) {
-        match s {
-            Statement::ExprStmt(expr) => { // basically a discard statement
-                self.insert_refcount_ops_expr(expr, false);
-            },
-            Statement::Return(val) => {
-                self.insert_refcount_ops_expr(val, true);
-                // all unused variables must be dropped here
-                let drops: Vec<_> = self.unused_vars.iter()
-                    .filter(|v| v.1.is_managed())
-                    .map(|v| {
-                        ExprKind::Var(v.0.clone()).expr_typed(v.1.clone())
-                    }).collect();
-                let return_val = std::mem::take(val);
-                *s = Statement::RcDropsReturn { drops, returns: Some(Box::new(return_val)) };
-            },
-            Statement::Let(name, val) => {
-                self.insert_refcount_ops_expr(val, true);
-            },
-            Statement::Assign(lhs, rhs) => {
-                self.insert_refcount_ops_expr(lhs, false);
-                self.insert_refcount_ops_expr(rhs, true);
-                // the old value of lhs must be dropped
-                make_drop(lhs);
-            },
-            Statement::If(expr, vec, vec1) => todo!(),
-            Statement::RcDropsReturn { .. } => unreachable!(),
-        }
-    }
-
-    fn insert_refcount_ops_expr(&mut self, e: &mut Expr, is_considered_use: bool) {
-        match &mut e.kind {
-            ExprKind::Literal(_) => {},
-            ExprKind::Var(v) => {
-                if !is_considered_use {}
-                else if self.vars_uses[v] <= 1 {
-                    // this is the last use, don't dup
-                } else {
-                    // dup
-                    *self.vars_uses.get_mut(v).unwrap() -= 1;
-                    make_dup(e);
-                }
-            },
-            ExprKind::Call(f, args) => {
-                self.insert_refcount_ops_expr(f, true);
-                for a in args {
-                    self.insert_refcount_ops_expr(a, true);
-                }
-                if !is_considered_use {
-                    // if the result is not used, drop it
-                    make_drop(e);
-                }
-            }
-            ExprKind::BinOp(_, expr, expr1) => {
-                // we consider binary operations as ordinary functions of two arguments
-                self.insert_refcount_ops_expr(expr, true);
-                self.insert_refcount_ops_expr(expr1, true);
-                if !is_considered_use {
-                    make_drop(e);
-                }
-            },
-            ExprKind::TypeCast(_, expr) => {
-                self.insert_refcount_ops_expr(expr, is_considered_use);
-            },
-            ExprKind::New(_, vec) => {
-                for e in vec {
-                    self.insert_refcount_ops_expr(e, true);
-                }
-                if !is_considered_use {
-                    make_drop(e);
-                }
-            },
-            ExprKind::Field(obj, _) => {
-                // object is not considered used
-                self.insert_refcount_ops_expr(obj, false);
-            },
-            ExprKind::RcDup(_) => unreachable!(),
-            ExprKind::RcDrop(_) => unreachable!()
-        }
-    }
-
-    /// `is_expr_used` is false if this expression itself is not considered a "use"
-    /// (note that subexpressions such as function arguments may still be considered a used)
-    fn find_used_variables_expr(&mut self, e: &Expr, is_considered_use: bool) {
-        match &e.kind {
-            ExprKind::Literal(_) => {},
-            ExprKind::Var(n) => { 
-                if is_considered_use { // if this expression is not "used", the variable is not considered used
-                    *self.vars_uses.entry(n.clone()).or_insert(0) += 1;
-                    // variable is used at least once
-                    self.unused_vars.remove(n);
-                }
-            },
-            ExprKind::BinOp(_, expr, expr1) => {
-                self.find_used_variables_expr(expr, true);
-                self.find_used_variables_expr(expr1, true);
-            },
-            ExprKind::TypeCast(_, expr) => {
-                self.find_used_variables_expr(expr, is_considered_use);
-            },
-            ExprKind::Call(f, args) => {
-                self.find_used_variables_expr(f, true);
-                for a in args {
-                    self.find_used_variables_expr(a, true);
-                }
-            },
-            ExprKind::New(_, vec) => {
-                for e in vec {
-                    self.find_used_variables_expr(e, true);
-                }
-            },
-            ExprKind::Field(obj, _) => {
-                // object is not considered used
-                self.find_used_variables_expr(obj, false);
-            },
-
-            ExprKind::RcDup(_) => unreachable!(),
-            ExprKind::RcDrop(_) => unreachable!(),
-        }
-    }
-
-    fn find_used_variables_stmt(&mut self, s: &Statement) {
-        match s {
-            // this is basically a `discard` statement
-            Statement::ExprStmt(expr) =>
-                self.find_used_variables_expr(expr, false),
-            Statement::Return(val) => // the return value is "used"
-                self.find_used_variables_expr(val, true),
-            Statement::Let(name, val) => {
-                self.find_used_variables_expr(val, true);
-                self.unused_vars.insert(name.clone(), val.ty.clone());
-            }
-            Statement::Assign(lhs, rhs) => {
-                self.find_used_variables_expr(lhs, false);
-                self.find_used_variables_expr(rhs, true);
-            }
-            Statement::If(expr, vec, vec1) => todo!(),
-            Statement::RcDropsReturn { .. } => unreachable!(),
-        }
-    }
-}
+use crate::{ast::{Expr, ExprKind, Function, Program, Statement, Ty}, util::HashMapExt};
 
 fn make_dup(e: &mut Expr) {
     if !e.ty.is_managed() {
@@ -210,25 +32,27 @@ fn make_drop(e: &mut Expr) {
     *e = dup;
 }
 
-pub struct RefCountPass2 {}
+pub struct RefCountPass2 {
+}
 
 // go backwards (from the end) in just one pass (vs RefCountPass)
 impl RefCountPass2 {
     pub fn new() -> Self {
-        Self {}
+        Self {
+        }
     }
 
-    fn visit_expr(&mut self, e: &mut Expr, is_considered_use: bool, used_vars: &mut HashSet<String>) {
+    fn visit_expr(&mut self, e: &mut Expr, is_considered_use: bool, used_vars: &mut HashMap<String, Ty>) {
         match &mut e.kind {
             ExprKind::Literal(_) => {}
             ExprKind::Var(name) => {
                 if is_considered_use {
-                    if used_vars.contains(name) {
+                    if used_vars.contains_key(name) {
                         // not a last use, dup
                         make_dup(e);
                     } else {
                         // last use, don't dup
-                        used_vars.insert(name.clone());
+                        used_vars.insert(name.clone(), e.ty.clone());
                     }
                 }
             },
@@ -268,7 +92,7 @@ impl RefCountPass2 {
         }
     }
 
-    fn visit_stmt(&mut self, s: &mut Statement, used_vars: &mut HashSet<String>, defined_vars: &mut HashMap<String, Ty>) {
+    fn visit_stmt(&mut self, s: &mut Statement, used_vars: &mut HashMap<String, Ty>, defined_vars: &mut HashMap<String, Ty>) {
         match s {
             Statement::ExprStmt(e) => {
                 // this is basically a `discard` statement
@@ -294,22 +118,28 @@ impl RefCountPass2 {
                 let used_vars_else = self.visit_block(else_, None);
                 // vars used in both blocks are just used
                 for v in used_vars_then.intersection(&used_vars_else) {
-                    used_vars.insert(v.clone());
+                    used_vars.insert(v.0.clone(), v.1.clone());
                 }
                 // vars used in just one block are also considered used, but must be dropped in the other block
+                let else_block_drops = match else_.last_mut() {
+                    Some(Statement::RcDropsReturn { drops, .. }) => drops,
+                    _ => unreachable!()
+                };
+                let then_block_drops = match then_.last_mut() {
+                    Some(Statement::RcDropsReturn { drops, .. }) => drops,
+                    _ => unreachable!()
+                };
                 for v in used_vars_then.difference(&used_vars_else) {
-                    used_vars.insert(v.clone());
+                    used_vars.insert(v.0.clone(), v.1.clone());
                     // drop in else block
-                    let var = ExprKind::Var(v.clone()).expr_typed(defined_vars[v].clone());
-                    let drop_ = Statement::ExprStmt(ExprKind::RcDrop(Box::new(var)).expr());
-                    else_.push(drop_);
+                    let var = ExprKind::Var(v.0.clone()).expr_typed(v.1.clone());
+                    else_block_drops.push(var);
                 }
                 for v in used_vars_else.difference(&used_vars_then) {
-                    used_vars.insert(v.clone());
+                    used_vars.insert(v.0.clone(), v.1.clone());
                     // drop in then block
-                    let var = ExprKind::Var(v.clone()).expr_typed(defined_vars[v].clone());
-                    let drop_ = Statement::ExprStmt(ExprKind::RcDrop(Box::new(var)).expr());
-                    then_.push(drop_);
+                    let var = ExprKind::Var(v.0.clone()).expr_typed(v.1.clone());
+                    then_block_drops.push(var);
                 }
             },
             Statement::RcDropsReturn { .. } => unreachable!(),
@@ -320,15 +150,15 @@ impl RefCountPass2 {
     /// 
     /// Returns variables defined in an outer scope which are used in this block
     // `extra_defs` are variables which should be treated as defined in this block
-    fn visit_block(&mut self, stmts: &mut Vec<Statement>, extra_defs: Option<HashMap<String,Ty>>) -> HashSet<String> {
+    fn visit_block(&mut self, stmts: &mut Vec<Statement>, extra_defs: Option<HashMap<String,Ty>>) -> HashMap<String, Ty> {
         let mut defined_vars = extra_defs.unwrap_or_default(); // vars defined in this scope (block)
-        let mut used_vars = HashSet::new();
+        let mut used_vars = HashMap::new();
         for s in stmts.iter_mut().rev() {
             self.visit_stmt(s, &mut used_vars, &mut defined_vars);
         }
         // variables which are defined but not used must be dropped
         let drops: Vec<_> = defined_vars.iter()
-            .filter(|v| !used_vars.contains(v.0))
+            .filter(|v| !used_vars.contains_key(v.0))
             .filter(|v| v.1.is_managed())
             .map(|v| {
                 ExprKind::Var(v.0.clone()).expr_typed(v.1.clone())
@@ -368,6 +198,7 @@ impl DropPropagationPass {
     pub fn run(p: &mut Program) {
         let mut this = Self { parent_drops: HashMap::new() };
         for f in &mut p.functions {
+            println!("{}", f.name);
             this.visit_block(&mut f.body);
             debug_assert!(this.parent_drops.is_empty());
         }

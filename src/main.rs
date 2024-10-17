@@ -9,7 +9,7 @@ mod lexer;
 lalrpop_mod!(grammar);
 mod parser;
 mod typeck;
-mod tyunify;
+mod typeck2;
 mod semantic;
 mod compile;
 mod rt;
@@ -34,7 +34,7 @@ fn main() {
     let mut sc = semantic::SemanticPreTypingChecker {};
     sc.check_all(&mut f);
 
-    let mut tc = typeck::TypeChecker::new();
+    let mut tc = typeck2::TypeChecker::new();
     tc.check(&mut f);
 
     println!("{}", f);

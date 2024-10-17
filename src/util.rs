@@ -1,4 +1,4 @@
-use std::ops::Index;
+use std::{collections::HashMap, hash::Hash, ops::Index};
 
 pub struct ScopedMap<K, V> {
     scope: usize,
@@ -85,5 +85,36 @@ impl<L, R> Either<L, R> {
             }
         }
         (l, r)
+    }
+}
+
+pub(crate) trait HashMapExt<K, V> {
+    /// Equivalent to [`std::collections::HashSet::intersection`] but for HashMap
+    fn intersection<'a>(&'a self, other: &Self) -> impl Iterator<Item = (&'a K, &'a V)>
+        where K: 'a, V: 'a;
+    /// Equivalent to [`std::collections::HashSet::difference`] but for HashMap
+    fn difference<'a>(&'a self, other: &Self) -> impl Iterator<Item = (&'a K, &'a V)>
+        where K: 'a, V: 'a;
+}
+
+impl<K: Eq + Hash, V> HashMapExt<K, V> for HashMap<K, V> {
+    fn intersection<'a>(&'a self, other: &Self) -> impl Iterator<Item = (&'a K, &'a V)>
+    where K: 'a, V: 'a {
+        self.iter()
+            .filter_map(|(k, v)| {
+                if other.contains_key(k) {
+                    Some((k, v))
+                } else { None }
+            })
+    }
+
+    fn difference<'a>(&'a self, other: &Self) -> impl Iterator<Item = (&'a K, &'a V)>
+    where K: 'a, V: 'a {
+        self.iter()
+            .filter_map(|(k, v)| {
+                if !other.contains_key(k) {
+                    Some((k, v))
+                } else { None }
+            })
     }
 }

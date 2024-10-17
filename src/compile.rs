@@ -92,6 +92,7 @@ impl<'a> Compiler<'a> {
         // emit all functions
         for f in &p.functions {
             self.emit_function(f);
+            self.locals.reset();
         }
 
         self.m.print_to_stderr();

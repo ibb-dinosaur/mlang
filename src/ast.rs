@@ -11,14 +11,14 @@ pub enum Ty {
     #[allow(clippy::enum_variant_names)]
     UserTy(TypeDef),
     #[allow(clippy::enum_variant_names)]
-    /// Used for type inference and checking
-    TyVar(usize),
+    /// Used only during type checking
+    Var(crate::typeck2::UnifTy),
     Named(String),
 }
 
 impl Ty {
     pub fn is_var(&self) -> bool {
-        matches!(self, Ty::TyVar(_))
+        matches!(self, Ty::Var(_))
     }
 
     /// Primitive types
@@ -259,7 +259,7 @@ impl std::fmt::Display for Ty {
             Ty::Void => write!(f, "void"),
             Ty::Bool => write!(f, "bool"),
             Ty::Any => write!(f, "any"),
-            Ty::TyVar(i) => write!(f, "tv${}", i),
+            Ty::Var(v) => write!(f, "{}", v),
             Ty::Func(ret, params) => {
                 write!(f, "(fun(")?;
                 for (i, p) in params.iter().enumerate() {

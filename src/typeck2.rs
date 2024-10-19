@@ -6,91 +6,34 @@ Type-checking takes several stages:
 3. Assigning types to expressions and inserting type casts where needed
 */
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
-
-use canrun::{Query, Reify};
+use std::{cell::RefCell, collections::HashMap};
 
 use crate::{ast::{Expr, ExprKind, Function, Literal, Program, Statement, Ty, TypeCastKind, TypeDef}, util::ScopedMap};
 
-/// Kanren term, imitates a Lisp
-#[derive(Debug)]
-enum KrTerm {
-    Atom(Rc<str>),
-    List(Rc<canrun::lvec::LVec<KrTerm>>)
+fn make_fty(ret: logica::Term, mut args: Vec<logica::Term>) -> logica::Term {
+    // ('func' ret args...)
+    args.insert(0, ret);
+    logica::Term::Comp("func".into(), args.into())
 }
 
-type KrVal = canrun::Value<KrTerm>;
-
-impl canrun::Unify for KrTerm {
-    fn unify(state: canrun::State, a: Rc<Self>, b: Rc<Self>) -> Option<canrun::State> {
-        match (&*a, &*b) {
-            (KrTerm::Atom(a), KrTerm::Atom(b)) if a == b => Some(state),
-            (KrTerm::List(a), KrTerm::List(b)) => 
-                canrun::lvec::LVec::unify(state, a.clone(), b.clone()),
-            _ => None
-        }
-    }
-}
-
-impl canrun::Reify for KrTerm {
-    type Reified = Ty;
-
-    fn reify_in(&self, state: &canrun::ReadyState) -> Option<Self::Reified> {
-        match self {
-            KrTerm::Atom(s) => match &**s {
-                "int" => Some(Ty::Int),
-                "void" => Some(Ty::Void),
-                "bool" => Some(Ty::Bool),
-                "any" => Some(Ty::Any),
-                "func" => Some(Ty::Named("$FUNC".to_string())), // a little hack
-                _ if s.starts_with("struct_") => {
-                    let name = &s[7..];
-                    USER_TYPES.with_borrow(|user_types| {
-                        Some(Ty::UserTy(user_types.get(name).unwrap().clone()))
-                    })
-                }
-                _ => unreachable!()
-            },
-            KrTerm::List(rc) => {
-                let mut v = rc.reify_in(state).unwrap();
-                if v[0] == Ty::Named("$FUNC".to_string()) {
-                    v.remove(0); // the $FUNC tag
-                    let ret = v.remove(0);
-                    let args = v;
-                    Some(Ty::Func(Box::new(ret), args.into_boxed_slice()))
-                } else { unreachable!() }
-            },
-        }
-    }
-}
-
-impl KrTerm {
-    fn make_fty(ret: KrVal, mut args: Vec<KrVal>) -> KrVal {
-        // ('func' ret args...)
-        args.insert(0, ret);
-        args.insert(0, IVBAF.with(|x| x[4].clone()));
-        KrTerm::List(Rc::new(args.into())).into()
-    }
+fn make_opt(inner: logica::Term) -> logica::Term {
+    // ('opt' inner)
+    logica::Term::Comp("opt".into(), vec![inner].into())
 }
 
 #[derive(Debug, Clone)]
-pub struct UnifTy(KrVal);
+pub struct UnifTy(logica::Term);
 
-impl From<KrVal> for UnifTy {
-    fn from(value: KrVal) -> Self { Self(value) }
+impl From<logica::Term> for UnifTy {
+    fn from(value: logica::Term) -> Self { Self(value) }
 }
-impl From<UnifTy> for KrVal {
+impl From<UnifTy> for logica::Term {
     fn from(value: UnifTy) -> Self { value.0 }
 }
 
 impl std::fmt::Display for UnifTy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.0 {
-            canrun::Value::Var(v) =>
-                write!(f, "tv${}", lvar_get_usize(v)),
-            canrun::Value::Resolved(rc) =>
-                write!(f, "{:?}", rc), // TODO
-        }
+        write!(f, "{}", self.0)
     }
 }
 
@@ -112,39 +55,38 @@ impl Ord for UnifTy {
 }
 
 pub struct TypeChecker {
-    globals: HashMap<String, KrVal>,
-    vars: ScopedMap<String, KrVal>,
-    goals: Vec<Box<dyn canrun::Goal>>,
-    tyvars: Vec<canrun::LVar<KrTerm>>,
-    solutions: HashMap<usize, Ty>
+    globals: HashMap<String, logica::Term>,
+    vars: ScopedMap<String, logica::Term>,
+    goals: Vec<logica::BoxedGoal>,
+    tyvars: Vec<logica::TVar>,
+    solutions: HashMap<logica::TVar, logica::Term>
 }
 
 thread_local! {
-    static IVBAF: [KrVal; 5] = [
-        KrTerm::Atom("int".into()).into(),
-        KrTerm::Atom("void".into()).into(),
-        KrTerm::Atom("bool".into()).into(),
-        KrTerm::Atom("any".into()).into(),
-        KrTerm::Atom("func".into()).into()];
+    static IVBA: [logica::Term; 4] = [
+        logica::Term::atom("int"),
+        logica::Term::atom("void"),
+        logica::Term::atom("bool"),
+        logica::Term::atom("any")];
     // must be global because the Reify trait doesn't have a context parameter
     // and it needs to access this to get the type definitions
     static USER_TYPES: RefCell<HashMap<String, TypeDef>> = RefCell::new(HashMap::new());
 }
 
-fn logic_ty(t: &Ty) -> KrVal {
+fn logic_ty(t: &Ty) -> logica::Term {
     match t {
         Ty::Unk | Ty::Named(_) => panic!(),
-        Ty::Int => IVBAF.with(|ivba| ivba[0].clone()),
-        Ty::Void => IVBAF.with(|ivba| ivba[1].clone()),
-        Ty::Bool => IVBAF.with(|ivba| ivba[2].clone()),
-        Ty::Any => IVBAF.with(|ivba| ivba[3].clone()),
+        Ty::Int => IVBA.with(|ivba| ivba[0].clone()),
+        Ty::Void => IVBA.with(|ivba| ivba[1].clone()),
+        Ty::Bool => IVBA.with(|ivba| ivba[2].clone()),
+        Ty::Any => IVBA.with(|ivba| ivba[3].clone()),
         Ty::UserTy(td) => {
             let name = format!("struct_{}", td.get().name);
-            KrTerm::Atom(name.into()).into()
+            logica::Term::atom(name)
         }
         Ty::Func(ret, args) => {
             let args = args.iter().map(logic_ty).collect();
-            KrTerm::make_fty(logic_ty(ret), args)
+            make_fty(logic_ty(ret), args)
         }
         Ty::Var(x) => x.0.clone(),
     }
@@ -159,7 +101,7 @@ impl TypeChecker {
             solutions: HashMap::new() }
     }
 
-    fn get_symbol_type(&self, name: &str) -> KrVal {
+    fn get_symbol_type(&self, name: &str) -> logica::Term {
         match self.vars.get(name) {
             Some(lty) => lty.clone(),
             None => match self.globals.get(name) {
@@ -206,16 +148,18 @@ impl TypeChecker {
         }
         self.vars.exit_scope();
         // 2. solve constraints
-        let q = canrun::Value::var();
-        let q_v: canrun::lvec::LVec<_> = self.tyvars.iter().cloned().map(canrun::Value::Var).collect();
-        self.goals.push(Box::new(canrun::unify(q.clone(), q_v)));
+        let q = logica::Term::Comp(
+            "list".into(),
+            self.tyvars.iter().map(|x| logica::Term::Var(*x)).collect());
 
-        let solution = 
-            canrun::goals::All::from(std::mem::take(&mut self.goals))
-            .query(q).next().unwrap();
+        let sol = logica::solve(
+            logica::all(std::mem::take(&mut self.goals)),
+            q
+        ).next().unwrap();
         
+        let logica::Term::Comp(_, solution) = sol else { unreachable!() };
         for (lv, t) in self.tyvars.iter().zip(solution) {
-            self.solutions.insert(lvar_get_usize(lv), t);
+            self.solutions.insert(*lv, t);
         }
         // 3. assign types to expressions, insert casts
         self.vars.enter_new_scope();
@@ -227,42 +171,43 @@ impl TypeChecker {
     }
 
     // `from` must be (implicitly) castable to `to`
-    fn restrict_castable(&mut self, from: &KrVal, to: &KrVal) {
-        //println!("restrict_castable {:?} -> {:?}", from, to);
-        let goal = canrun::any![
-            canrun::unify(from.clone(), to.clone()),
-            canrun::unify(from.clone(), logic_ty(&Ty::Any)),
-            canrun::unify(logic_ty(&Ty::Any), to.clone())
-        ];
-        self.goals.push(Box::new(goal));
+    fn restrict_castable(&mut self, from: &logica::Term, to: &logica::Term) {
+        println!("restrict_castable {:?} -> {:?}", from, to);
+        let goal = logica::any([
+            logica::unify(from.clone(), to.clone()), // from ~ to
+            logica::unify(from.clone(), logic_ty(&Ty::Any)), // from ~ any
+            logica::unify(logic_ty(&Ty::Any), to.clone()) // to ~ any
+        ]);
+        self.goals.push(goal);
     }
 
-    fn restrict_equal(&mut self, from: &KrVal, to: &KrVal) {
-        //println!("restrict_equal {:?} ~ {:?}", from, to);
-        let goal = canrun::unify(from.clone(), to.clone());
-        self.goals.push(Box::new(goal));
+    fn restrict_equal(&mut self, from: &logica::Term, to: &logica::Term) {
+        println!("restrict_equal {:?} ~ {:?}", from, to);
+        let goal = logica::unify(from.clone(), to.clone());
+        self.goals.push(goal);
     }
 
-    fn restrict_field(&mut self, obj: &KrVal, field_name: &str, field: &KrVal) {
-        //println!("restrict_field {:?}.{} -> {:?}", obj, field_name, field);
+    fn restrict_field(&mut self, obj: &logica::Term, field_name: &str, field: &logica::Term) {
+        println!("restrict_field {:?}.{} -> {:?}", obj, field_name, field);
         let field_name = field_name.to_string();
         let field = field.clone();
-        let goal = canrun::project::project_1(obj.clone(),
+        let goal = logica::project(obj.clone(),
             move |obj_ty| {
-                if let KrTerm::Atom(s) = &*obj_ty {
-                    let struct_name = &s[7..];
-                    USER_TYPES.with_borrow(|user_types| -> Box<dyn canrun::Goal> {
-                        match user_types.get(struct_name).unwrap().get().get_field_ty(&field_name) {
-                            None => Box::new(canrun::Fail),
-                            Some(field_ty) =>
-                                Box::new(canrun::unify(field.clone(), logic_ty(&field_ty))),
-                        }
-                    })
-                } else {
-                    Box::new(canrun::Fail)
-                }
+                if let logica::Term::Atom(s) = &obj_ty {
+                    if let Some(struct_name) = s.strip_prefix("struct_") {
+                        USER_TYPES.with_borrow(|user_types| {
+                            match user_types.get(struct_name).unwrap().get().get_field_ty(&field_name) {
+                                None => logica::fail(),
+                                Some(field_ty) =>
+                                    logica::unify(field.clone(), logic_ty(&field_ty)),
+                            }
+                        })
+                    } else {
+                        logica::fail()
+                    }
+                } else { logica::fail() }
             });
-        self.goals.push(Box::new(goal));
+        self.goals.push(goal);
     }
 
     fn visit_stmt(&mut self, stmt: &mut Statement) {
@@ -277,7 +222,7 @@ impl TypeChecker {
                 self.restrict_castable(&expr_ty, &ret_ty);
             }
             Statement::Let(name, expr) => {
-                let var_ty = canrun::Value::Var(self.new_tyvar());
+                let var_ty = logica::Term::Var(self.new_tyvar());
                 self.visit_expr(expr);
                 let rhs_ty = logic_ty(&expr.ty);
                 self.vars.insert_new(name.clone(), var_ty.clone());
@@ -346,13 +291,13 @@ impl TypeChecker {
             ExprKind::Call(callee, args) => {
                 self.visit_expr(callee);
                 let mut arg_tyvars = vec![];
-                let ret_type = canrun::Value::Var(self.new_tyvar());
+                let ret_type = logica::Term::Var(self.new_tyvar());
                 *expr_type = Ty::Var(ret_type.clone().into());
                 for arg in args {
                     let arg_t = self.visit_and_add_implicit_cast(arg);
                     arg_tyvars.push(arg_t);
                 }
-                let expected_fty = KrTerm::make_fty(ret_type, arg_tyvars);
+                let expected_fty = make_fty(ret_type, arg_tyvars);
                 // function types are not castable
                 self.restrict_equal(&expected_fty, &logic_ty(&callee.ty));
             }
@@ -380,44 +325,47 @@ impl TypeChecker {
     }
 
     /// When an expression result is used, add (possible) implicit cast
-    fn visit_and_add_implicit_cast(&mut self, e: &mut Expr) -> KrVal {
+    fn visit_and_add_implicit_cast(&mut self, e: &mut Expr) -> logica::Term {
         self.visit_expr(e);
         let original_expr_type = logic_ty(&e.ty);
-        let cast_var = canrun::Value::Var(self.new_tyvar());
+        let cast_var = logica::Term::Var(self.new_tyvar());
         e.ty = Ty::Var(UnifTy(cast_var.clone()));
         self.restrict_castable(&original_expr_type, &cast_var);
         cast_var
     }
 
-    fn new_tyvar(&mut self) -> canrun::LVar<KrTerm> {
-        let v = canrun::LVar::new();
-        self.tyvars.push(v.clone());
+    fn new_tyvar(&mut self) -> logica::TVar {
+        let v = logica::TVar::new();
+        self.tyvars.push(v);
         v
     }
-    
-    /*fn get_resolved(&self, ty: &Ty) -> Ty {
-        match ty {
-            Ty::TyVar(id) => self.solutions[id].clone(),
-            _ => ty.clone()
-        }
-    }
 
-    fn get_resolved_tt(&self, ty: &TTyt) -> Ty {
+    fn get_resolved_kr(&self, ty: &logica::Term) -> Ty {
         match ty {
-            canrun::Value::Resolved(t) => t.reify_in(
-                &canrun::State::new().ready().unwrap()).unwrap(),
-            canrun::Value::Var(v) =>
-                self.get_resolved(&Ty::TyVar(lvar_get_usize(v)))
-        }
-    }*/
-
-    fn get_resolved_kr(&self, ty: &KrVal) -> Ty {
-        match ty {
-            canrun::Value::Resolved(t) =>
-                t.reify_in(&canrun::State::new().ready().unwrap()).unwrap(),
-            canrun::Value::Var(v) => {
-                self.solutions[&lvar_get_usize(v)].clone()
+            logica::Term::Atom(s) => {
+                match &**s {
+                    "int" => Ty::Int,
+                    "void" => Ty::Void,
+                    "bool" => Ty::Bool,
+                    "any" => Ty::Any,
+                    _ if s.starts_with("struct_") => {
+                        let name = &s[7..];
+                        USER_TYPES.with_borrow(|user_types| {
+                            Ty::UserTy(user_types.get(name).unwrap().clone())
+                        })
+                    }
+                    _ => panic!()
+                }
             }
+            logica::Term::Comp(f, args) => {
+                if &**f == "func" {
+                    let ret = self.get_resolved_kr(&args[0]);
+                    let args: Vec<_> = args.iter().skip(1).map(|x| self.get_resolved_kr(x)).collect();
+                    Ty::Func(Box::new(ret), args.into_boxed_slice())
+                } else { panic!() }
+            }
+            logica::Term::Var(v) => 
+                self.get_resolved_kr(self.solutions.get(v).unwrap())
         }
     }
 
@@ -446,7 +394,7 @@ impl TypeChecker {
             }
             Statement::Let(_, expr) => {
                 // restore the type var assigned to this variable
-                let var_ty= expr.get_extra::<KrVal>().unwrap().clone();
+                let var_ty= expr.get_extra::<logica::Term>().unwrap().clone();
                 self.resolve_expr(expr);
                 insert_cast(expr, self.get_resolved_kr(&var_ty));
             }
@@ -545,11 +493,6 @@ impl TypeChecker {
         *expr_type = value_type;
         insert_cast(expr, expected_type);
     }
-}
-
-// this is horifically unsafe unfortunately we don't really have a choice
-fn lvar_get_usize<T>(tv: &canrun::LVar<T>) -> usize {
-    unsafe { *(tv as *const canrun::LVar<T> as *const usize) }
 }
 
 // this is to get around the borrow checker

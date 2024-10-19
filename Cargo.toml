@@ -12,7 +12,8 @@ lalrpop-util = "0.22.0"
 inkwell = { version = "0.5.0", features = ["llvm18-0"] }
 fnv = "1.0.7"
 bitflags = "2.6.0"
-canrun = "0.5.0"
+# canrun = "0.5.0"
+logica = { path = "logica" }
 
 [build-dependencies]
 # bindgen = "0.70.1"

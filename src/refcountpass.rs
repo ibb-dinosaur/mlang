@@ -87,6 +87,10 @@ impl RefCountPass2 {
             ExprKind::Field(obj, _) => {
                 // object is not considered used
                 self.visit_expr(obj, false, used_vars);
+                // if the value is considered a "use", we must dup it
+                if is_considered_use {
+                    make_dup(e);
+                }
             },
             ExprKind::RcDup(_) | ExprKind::RcDrop(_) => unreachable!(),
         }

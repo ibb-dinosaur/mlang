@@ -59,7 +59,8 @@ pub struct TypeChecker {
     vars: ScopedMap<String, logica::Term>,
     goals: Vec<logica::BoxedGoal>,
     tyvars: Vec<logica::TVar>,
-    solutions: HashMap<logica::TVar, logica::Term>
+    solutions: HashMap<logica::TVar, logica::Term>,
+    dump_info: bool,
 }
 
 thread_local! {
@@ -99,7 +100,8 @@ impl TypeChecker {
             vars: ScopedMap::new(false),
             goals: vec![],
             tyvars: vec![],
-            solutions: HashMap::new() }
+            solutions: HashMap::new(),
+            dump_info: false }
     }
 
     fn get_symbol_type(&self, name: &str) -> logica::Term {
@@ -137,6 +139,7 @@ impl TypeChecker {
         self.goals.clear();
         self.tyvars.clear();
         self.solutions.clear();
+        self.dump_info = crate::OPTIONS.get().unwrap().print_typeck.contains(&func.name);
 
         for (name, ty) in &func.params {
             self.vars.insert_new(name.clone(), logic_ty(ty));
@@ -148,12 +151,15 @@ impl TypeChecker {
             self.visit_stmt(stmt);
         }
         self.vars.exit_scope();
+        if self.dump_info {
+            // print AST with type variables
+            println!("{}", func);
+        }
         // 2. solve constraints
         let q = logica::Term::Comp(
             "list".into(),
             self.tyvars.iter().map(|x| logica::Term::Var(*x)).collect());
         let goal = logica::all(std::mem::take(&mut self.goals));
-        println!("{:?}", goal);
         let sol = logica::solve(goal,q).next().unwrap();
         
         let logica::Term::Comp(_, solution) = sol else { unreachable!() };
@@ -171,7 +177,9 @@ impl TypeChecker {
 
     // `from` must be (implicitly) castable to `to`
     fn restrict_castable(&mut self, from: &logica::Term, to: &logica::Term) {
-        println!("restrict_castable {} -> {}", from, to);
+        if self.dump_info {
+            println!("restrict_castable {} -> {}", from, to);
+        }
         let tmp = logica::Term::Var(logica::TVar::new());
         let goal = logica::any([
             logica::unify(from.clone(), to.clone()), // from ~ to
@@ -188,13 +196,17 @@ impl TypeChecker {
     }
 
     fn restrict_equal(&mut self, from: &logica::Term, to: &logica::Term) {
-        println!("restrict_equal {} ~ {}", from, to);
+        if self.dump_info {
+            println!("restrict_equal {} ~ {}", from, to);
+        }
         let goal = logica::unify(from.clone(), to.clone());
         self.goals.push(goal);
     }
 
     fn restrict_field(&mut self, obj: &logica::Term, field_name: &str, field: &logica::Term) {
-        println!("restrict_field {}.{} -> {}", obj, field_name, field);
+        if self.dump_info {
+            println!("restrict_field {}.{} -> {}", obj, field_name, field);
+        }
         let field_name = field_name.to_string();
         let field = field.clone();
         let goal = logica::project(obj.clone(),

@@ -202,7 +202,6 @@ impl DropPropagationPass {
     pub fn run(p: &mut Program) {
         let mut this = Self { parent_drops: HashMap::new() };
         for f in &mut p.functions {
-            println!("{}", f.name);
             this.visit_block(&mut f.body);
             debug_assert!(this.parent_drops.is_empty());
         }

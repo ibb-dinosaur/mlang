@@ -1,6 +1,6 @@
 use std::{collections::{BTreeMap, HashMap}, hash::Hasher};
 
-use inkwell::{attributes::AttributeLoc, basic_block::BasicBlock, builder::Builder, context::Context, module::Module, passes::PassManager, targets::{InitializationConfig, Target, TargetTriple}, types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType, StructType, VoidType}, values::{AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue}, AddressSpace, IntPredicate, OptimizationLevel};
+use inkwell::{attributes::AttributeLoc, basic_block::BasicBlock, builder::Builder, context::Context, module::Module, passes::{PassBuilderOptions, PassManager}, targets::{InitializationConfig, Target, TargetTriple}, types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType, StructType, VoidType}, values::{AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue}, AddressSpace, IntPredicate, OptimizationLevel};
 
 use crate::{ast::*, util::ScopedMap};
 
@@ -103,9 +103,26 @@ impl<'a> Compiler<'a> {
             self.locals.reset();
         }
 
-        self.m.print_to_stderr();
         let _ = self.m.verify().inspect_err(|e| println!("LLVM Validation Error:\n{}", e.to_string()));
     
+        if crate::OPTIONS.get().unwrap().opt {
+            Target::initialize_native(&InitializationConfig::default()).unwrap();
+
+            let triple = TargetTriple::create("x86_64-unknown-linux-gnu");
+            let target = Target::from_triple(&triple).unwrap();
+
+            let machine = target.create_target_machine(&triple,
+                "generic", "",
+                OptimizationLevel::Less, // -O1
+                inkwell::targets::RelocMode::DynamicNoPic,
+                inkwell::targets::CodeModel::Small).unwrap();
+            self.m.run_passes(
+                "default<O1>", &machine,
+                PassBuilderOptions::create()).unwrap();
+        }
+        if crate::OPTIONS.get().unwrap().print_llvm {
+            self.m.print_to_stderr();
+        }
         self.m
     }
 

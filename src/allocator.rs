@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use memmap2::{MmapMut, MmapOptions};
 
 pub struct Allocator {
@@ -5,6 +7,7 @@ pub struct Allocator {
     memory_end: *mut u8,
     // the map is dropped when the allocator is dropped
     mmap: Option<MmapMut>,
+    is_init: Cell<bool>,
 }
 
 bitflags::bitflags! {
@@ -104,13 +107,16 @@ impl BlockPtr {
             }
         }
 
-        println!("{:p} {:>5} {}{}",
+        print!("{:p} {:>5} {}{}",
             self.0, 
             fmt_num(size),
             if self.is_used() { "U" } else { " " },
             //if unsafe { (*self.0).mark } == 1 { "M" } else { " " },
-            if self.is_tail() { "T" } else if self.is_head(size) { "H" } else { " " },
-        );
+            if self.is_tail() { "T" } else if self.is_head(size) { "H" } else { " " });
+        if self.get_refcount() > 0 {
+            print!("   ({} refs)", self.get_refcount())
+        }
+        println!()
     }
 
     fn split(&self, this_size: u32, size_first: u32) -> (Self, Self) { unsafe {
@@ -147,10 +153,8 @@ impl BlockPtr {
 }
 
 impl Allocator {
-    pub unsafe fn new(memory_start: *mut u8, memory_end: *mut u8) -> Self {
-        let allocator = Self { memory_start, memory_end, mmap: None };
-        allocator.init();
-        allocator
+    pub const unsafe fn new(memory_start: *mut u8, memory_end: *mut u8) -> Self {
+        Self { memory_start, memory_end, mmap: None, is_init: Cell::new(false) }
     }
 
     pub fn new_mmap(size: usize) -> std::io::Result<Self> {
@@ -161,13 +165,15 @@ impl Allocator {
         Ok(self_)
     }
 
-    fn init(&self) {
+    pub fn init(&self) {
+        assert!(!self.is_init.get());
         debug_assert!(self.memory_start as usize % 16 == 0);
         debug_assert!(self.memory_end as usize % 16 == 0);
         let memory_size = self.memory_end as usize - self.memory_start as usize;
         debug_assert!(memory_size > 16);
         debug_assert!(memory_size < u32::MAX as usize);
         BlockPtr::from(self.memory_start).init(memory_size as u32, 0, true);
+        self.is_init.set(true);
     }
 
     fn head(&self) -> (BlockPtr, u32) {
@@ -176,6 +182,7 @@ impl Allocator {
     }
 
     pub fn dump_debug(&self) {
+        debug_assert!(self.is_init.get());
         let (mut block, mut block_size) = self.head();
         loop {
             block.validate(Some(self));
@@ -203,6 +210,11 @@ impl Allocator {
         None
     }
 
+    pub fn dealloc_cheap(&self, alloc_ptr: *mut u8, _alloc_size: usize) {
+        // just mark as unused, do nothing else
+        BlockPtr::from_content_ptr(alloc_ptr).set_used(false);
+    }
+
     /// Safety: the pointer must have been allocated by this allocator
     pub unsafe fn inc_refcount(ptr: *mut u8) {
         let block = BlockPtr::from_content_ptr(ptr);
@@ -216,3 +228,5 @@ impl Allocator {
         block.get_refcount()
     }
 }
+
+unsafe impl std::marker::Send for Allocator {}

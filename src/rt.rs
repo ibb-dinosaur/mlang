@@ -1,13 +1,15 @@
 //! Runtime types and functions
 #![allow(unused)]
 
+use std::sync::Mutex;
+
 use crate::allocator::Allocator;
 
 /// The `any` type
 /// 16 bytes, first word = tag, second word = actual value (can be scalar or pointer)
 /// The any_tag is different(!) from the type tag
 #[repr(C)]
-struct AnyT {
+pub(crate) struct AnyT {
     any_tag: usize,
     value: usize,
 }
@@ -127,10 +129,25 @@ extern "C" fn __rcdrop(ptr: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) { unsa
     }
 } }
 
-extern "C" fn __allocm(size: u64) -> *mut u8 {
-    todo!()
+pub(crate) static RT_ALLOCATOR: Mutex<Allocator> = Mutex::new(unsafe {
+    Allocator::new(std::ptr::null_mut(), std::ptr::null_mut()) });
+
+/// Must be called before any calls to __allocm and __freem
+pub fn init_rt_allocator(mem_size: usize) {
+    let mut a = RT_ALLOCATOR.lock().unwrap();
+    *a = Allocator::new_mmap(mem_size).unwrap();
+    a.init();
 }
 
-extern "C" fn __freem(ptr: *mut u8, size: u64) {
-    todo!()
+pub extern "C" fn __allocm(size: u64) -> *mut u8 {
+    // allocate managed memory
+    let a = RT_ALLOCATOR.lock().unwrap();
+    let ptr = a.alloc(size as usize).unwrap();
+    // the allocator sets refcount to zero, increase it to one
+    unsafe { Allocator::inc_refcount(ptr); }
+    ptr
+}
+
+pub extern "C" fn __freem(ptr: *mut u8, size: u64) {
+    RT_ALLOCATOR.lock().unwrap().dealloc_cheap(ptr, size as _);
 }

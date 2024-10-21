@@ -21,6 +21,7 @@ struct BlockHeader {
     /// Magic number (for debugging), should be 0x[12,4A,21]
     checknum: [u8; 3],
     /// XOR of size and prev_size
+    /// `size` does NOT include the header
     xor_size: u32,
     _pad: [u8; 4],
     refcount: u32,
@@ -46,6 +47,7 @@ impl BlockPtr {
             (*self.0).status = if tail { BlkStatus::TAIL } else { BlkStatus::empty() };
             (*self.0).checknum = [0x12, 0x4A, 0x21];
             (*self.0).xor_size = size ^ prev_size;
+            (*self.0).refcount = 0;
         }
     }
 
@@ -62,8 +64,8 @@ impl BlockPtr {
     /// Return the block pointer and its size
     fn next(&self, size: u32) -> (Self, u32) {
         if self.is_tail() { panic!() }
-        let ptr = Self(unsafe { self.0.byte_add(size as usize) });
-        let s = unsafe { (*self.0).xor_size ^ size };
+        let ptr = Self(unsafe { self.0.byte_add(size as usize + 16) });
+        let s = unsafe { (*ptr.0).xor_size ^ size };
         (ptr, s)
     }
 
@@ -71,7 +73,7 @@ impl BlockPtr {
     fn prev(&self, size: u32) -> (Self, u32) {
         if self.is_head(size) { panic!() }
         let s = self.prev_size(size);
-        let ptr = Self(unsafe { self.0.byte_sub(s as usize) });
+        let ptr = Self(unsafe { self.0.byte_sub(s as usize + 16) });
         (ptr, s)
     }
 
@@ -184,7 +186,8 @@ impl Allocator {
     }
 
     pub fn alloc(&self, alloc_size: usize) -> Option<*mut u8> {
-        let alloc_size = (alloc_size + 15) & !15; // should we align to 8 or 16?
+        debug_assert!(self.is_init.get());
+        let alloc_size = (alloc_size + 15) & !15; // round to 16
         assert!(alloc_size < u32::MAX as usize);
         // walk the blocks looking for a free one
         let (mut block, mut block_size) = self.head();

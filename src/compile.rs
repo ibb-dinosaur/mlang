@@ -1,6 +1,6 @@
 use std::{collections::{BTreeMap, HashMap}, hash::Hasher};
 
-use inkwell::{attributes::AttributeLoc, basic_block::BasicBlock, builder::Builder, context::Context, module::Module, passes::{PassBuilderOptions, PassManager}, targets::{InitializationConfig, Target, TargetTriple}, types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType, StructType, VoidType}, values::{AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue}, AddressSpace, IntPredicate, OptimizationLevel};
+use inkwell::{attributes::{Attribute, AttributeLoc}, basic_block::BasicBlock, builder::Builder, context::Context, module::Module, passes::{PassBuilderOptions, PassManager}, targets::{InitializationConfig, Target, TargetTriple}, types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType, StructType, VoidType}, values::{AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue}, AddressSpace, IntPredicate, OptimizationLevel};
 
 use crate::{ast::*, util::ScopedMap};
 
@@ -53,10 +53,18 @@ impl<'a> Compiler<'a> {
         let alloc_fn = self.m.add_function("__allocm", 
             self.tys.ptr.fn_type(&[self.tys.int.into()], false), None);
         alloc_fn.add_attribute(AttributeLoc::Function, self.ctx.create_string_attribute("allockind", "alloc"));
+        alloc_fn.add_attribute(AttributeLoc::Function, self.ctx.create_string_attribute("alloc-family", "__allocm"));
+        alloc_fn.add_attribute(AttributeLoc::Function, self.ctx.create_enum_attribute(
+            Attribute::get_named_enum_kind_id("allocsize"), 0));
+        alloc_fn.add_attribute(AttributeLoc::Return, self.ctx.create_enum_attribute(
+            Attribute::get_named_enum_kind_id("nonnull"), 0));
+        alloc_fn.add_attribute(AttributeLoc::Return, self.ctx.create_enum_attribute(
+            Attribute::get_named_enum_kind_id("noundef"), 0));
     
         let free_fn = self.m.add_function("__freem",
             self.tys.c_void.fn_type(&[self.tys.ptr.into(), self.tys.int.into()], false), None);
         free_fn.add_attribute(AttributeLoc::Function, self.ctx.create_string_attribute("allockind", "free"));
+        free_fn.add_attribute(AttributeLoc::Function, self.ctx.create_string_attribute("alloc-family", "__allocm"));
     }
 
     fn load_core_ll(&mut self) {

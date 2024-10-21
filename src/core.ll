@@ -3,8 +3,8 @@
 declare void @__tc_fail1(i64 %0, i64 %1, i64 %2) cold noreturn
 declare void @__tc_fail_null(i64 %0) cold noreturn
 declare i1 @__cmp_any({ i64, i64 } %0, { i64, i64 } %1)
-declare ptr @__allocm(i64 %0) allockind("alloc")
-declare void @__freem(ptr %0, i64 %1) allockind("free")
+declare nonnull noundef ptr @__allocm(i64 %0) allockind("alloc") "alloc-family"="__allocm" allocsize(0)
+declare void @__freem(ptr %0, i64 %1) allockind("free") "alloc-family"="__allocm"
 
 ; simple values - no implicit casts, type tags must be exactly equal
 

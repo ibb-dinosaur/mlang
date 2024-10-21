@@ -50,6 +50,7 @@ TyName: Ty = {
 
 TyExpr: Ty = {
     "fun" "(" <params:CommaList<TyName>> ")" <ret:("->" <TyName>)?> => Ty::Func(Box::new(ret.unwrap_or(Ty::Void)), params.into()),
+    <t:TyName> "?" => Ty::Option(Box::new(t)),
     TyName
 }
 
@@ -111,6 +112,7 @@ Atom: Expr = {
     <n:int> => ExprKind::Literal(Literal::Int(n)).expr(),
     "true" => ExprKind::Literal(Literal::Bool(true)).expr(),
     "false" => ExprKind::Literal(Literal::Bool(false)).expr(),
+    "null" => ExprKind::Literal(Literal::Null).expr(),
     "(" <e:Expr> ")" => e,
 };
 
@@ -167,6 +169,7 @@ extern {
         "end" => Token::KwEnd,
         "type" => Token::KwType,
         "new" => Token::KwNew,
+        "null" => Token::KwNull,
         "(" => Token::LParen,
         ")" => Token::RParen,
         ":" => Token::Colon,
@@ -183,5 +186,6 @@ extern {
         ">" => Token::Gt,
         ">=" => Token::Ge,
         "." => Token::Dot,
+        "?" => Token::QMark,
     }
 }

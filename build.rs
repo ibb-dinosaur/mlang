@@ -38,14 +38,32 @@ fn main() {
     lalrpop::process_src().unwrap();
 
     // llvm-extras
-    /*println!("cargo:rerun-if-changed=llvm-extras.cpp");
+    println!("cargo:rerun-if-changed=llvm-extras.cpp");
     cc::Build::new()
         .cpp(true)
         .file("llvm-extras.cpp")
         .include("/usr/include/llvm-18")
         .include("/usr/include/llvm-c-18")
-        .compile("llvm-extras");*/
+        .compile("llvm-extras");
 
     println!("cargo:rustc-link-search=.");
     println!("cargo:rustc-link-lib=static=llvm-extras");
+
+    println!("cargo:rerun-if-changed=src/core.ll");
+    if !std::process::Command::new("llvm-as-18")
+        .arg("src/core.ll")
+        .status()
+        .expect("failed to execute llvm-as-18")
+        .success() {
+            panic!("failed to assemble core.ll");
+        }
+    if !std::process::Command::new("opt-18")
+        .arg("--Os")
+        .arg("src/core.bc")
+        .arg("-o").arg("src/core.bc")
+        .status()
+        .expect("failed to execute opt-18")
+        .success() {
+            panic!("failed to optimize core.bc");
+        }
 }

@@ -1,8 +1,10 @@
 use std::{collections::{BTreeMap, HashMap}, hash::Hasher};
 
-use inkwell::{attributes::{AttributeLoc}, basic_block::BasicBlock, builder::Builder, context::Context, module::Module, types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType, StructType, VoidType}, values::{AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue}, AddressSpace, IntPredicate};
+use inkwell::{attributes::AttributeLoc, basic_block::BasicBlock, builder::Builder, context::Context, module::Module, passes::PassManager, targets::{InitializationConfig, Target, TargetTriple}, types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType, StructType, VoidType}, values::{AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue}, AddressSpace, IntPredicate, OptimizationLevel};
 
 use crate::{ast::*, util::ScopedMap};
+
+static CORE_BC: &[u8] = include_bytes!("core.bc");
 
 pub struct Compiler<'a> {
     ctx: &'a Context,
@@ -39,16 +41,14 @@ impl<'a> Compiler<'a> {
         Self { ctx, m, b, tys: PrimTypes { int, c_void, any, ptr, bool, int32 }, globals: HashMap::new(), locals: ScopedMap::new(false), obj_type_tags: BTreeMap::new(), user_type_structs: BTreeMap::new() }
     }
 
-    fn initialize_builtins(&mut self) {
+    fn declare_builtins(&mut self) {
         let t1: inkwell::types::FunctionType<'_> = self.tys.c_void.fn_type(&[self.tys.int.into(), self.tys.int.into(), self.tys.int.into()], false);
         let type_cast_fail_fn = self.m.add_function("__tc_fail1", t1, None);
         type_cast_fail_fn.add_attribute(AttributeLoc::Function, self.ctx.create_enum_attribute(5, 0)); // cold
         type_cast_fail_fn.add_attribute(AttributeLoc::Function, self.ctx.create_enum_attribute(33, 0)); // noreturn
-        type_cast_fail_fn.add_attribute(AttributeLoc::Function, self.ctx.create_enum_attribute(38, 0)); // nounwind
 
-        let cmp_any_fn = self.m.add_function("__cmp_any", 
+        let _cmp_any_fn = self.m.add_function("__cmp_any", 
             self.tys.bool.fn_type(&[self.tys.any.into(), self.tys.any.into()], false), None);
-        cmp_any_fn.add_attribute(AttributeLoc::Function, self.ctx.create_enum_attribute(38, 0)); // nounwind
     
         let alloc_fn = self.m.add_function("__allocm", 
             self.tys.ptr.fn_type(&[self.tys.int.into()], false), None);
@@ -59,8 +59,16 @@ impl<'a> Compiler<'a> {
         free_fn.add_attribute(AttributeLoc::Function, self.ctx.create_string_attribute("allockind", "free"));
     }
 
-    pub fn emit_program(mut self, p: &Program) {
-        self.initialize_builtins();
+    fn load_core_ll(&mut self) {
+        let buf = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range(CORE_BC, "core.bc");
+        let core_mod = self.ctx.create_module_from_ir(buf).unwrap();
+        self.m.link_in_module(core_mod).unwrap();
+        //self.m.print_to_stderr();
+    }
+
+    pub fn emit_program(mut self, p: &Program) -> inkwell::module::Module<'a> {
+        self.declare_builtins();
+        self.load_core_ll();
         // declare all user types
         for td in &p.user_types {
             let t = td.get();
@@ -97,6 +105,8 @@ impl<'a> Compiler<'a> {
 
         self.m.print_to_stderr();
         let _ = self.m.verify().inspect_err(|e| println!("LLVM Validation Error:\n{}", e.to_string()));
+    
+        self.m
     }
 
     fn emit_function(&mut self, f: &Function) {
@@ -207,6 +217,25 @@ impl<'a> Compiler<'a> {
             ExprKind::Literal(Literal::Void) => {
                 self.tys.int.get_undef().into()
             },
+            ExprKind::Literal(Literal::Null) => {
+                match &e.ty {
+                    Ty::Option(x) => match &**x {
+                        Ty::UserTy(_) => {
+                            // null of a pointer type is just a null pointer
+                            self.tys.ptr.const_null().into()
+                        },
+                        Ty::Any => {
+                            // null : any = { 3, 0 }
+                            self.tys.any.const_named_struct(&[
+                                self.tys.int.const_int(3, false).into(),
+                                self.tys.int.const_zero().into()
+                            ]).into()
+                        }
+                        _ => todo!(),
+                    }
+                    _ => unreachable!()
+                }
+            }
             ExprKind::Var(name) => {
                 match self.locals.get(name) {
                     Some(place) => { // locals are `alloca`d, load the value
@@ -249,34 +278,71 @@ impl<'a> Compiler<'a> {
                 let val = self.emit_expr(expr, drops);
                 match type_cast_kind {
                     TypeCastKind::ToAny => {
+                        // special case: any? -> any is a no-op
+                        if expr.ty == Ty::Option(Box::new(Ty::Any)) {
+                            return val;
+                        }
                         let type_tag = any_tag_of_type(&expr.ty);
                         let payload = self.convert_val_to_any_payload(val, &expr.ty);
-                        // the struct has to be a constant, so we use undef in the second field
-                        // and then insert (at runtime) the actual value
-                        let any_val = self.tys.any.const_named_struct(&[
-                            self.tys.int.const_int(type_tag, false).into(),
-                            self.tys.int.get_undef().into()
-                        ]);
-                        self.b.build_insert_value(any_val, payload, 1, "").unwrap().into_struct_value().into()
+                        self.b.build_direct_call(
+                            self.m.get_function(".toany_simple").unwrap(),
+                            &[self.tys.int.const_int(type_tag, false).into(), payload.into()], 
+                            "").unwrap().try_as_basic_value().unwrap_left()
                     },
                     TypeCastKind::FromAnySimple => {
                         let any_val = val.into_struct_value();
                         assert!(any_val.get_type() == self.tys.any);
-                        let fail_branch = self.new_bb("tcfail");
-                        let success_branch = self.new_bb("");
-                        let any_val_tag = self.b.build_extract_value(any_val, 0, "tag").unwrap().into_int_value();
                         let type_tag = self.tys.int.const_int(any_tag_of_type(&e.ty), false);
-                        let any_val_payload = self.b.build_extract_value(any_val, 1, "").unwrap();
-                        let cmp = self.b.build_int_compare(inkwell::IntPredicate::EQ, any_val_tag, type_tag, "").unwrap();
-                        self.b.build_conditional_branch(cmp, success_branch, fail_branch).unwrap();
-                        // fail branch
-                        self.b.position_at_end(fail_branch);
-                        self.build_typecast_fail(type_tag, any_val_tag, any_val_payload);
-                        // success branch
-                        self.b.position_at_end(success_branch);
-                        self.convert_any_payload_to_type(any_val_payload.into_int_value(), &e.ty)
+                        let payload = self.b.build_direct_call(
+                            self.m.get_function(".fromany_simple").unwrap(),
+                            &[type_tag.into(), any_val.into()],
+                            "").unwrap().try_as_basic_value().unwrap_left();
+                        self.convert_any_payload_to_type(payload.into_int_value(), &e.ty)
                     },
-                    TypeCastKind::FromAnyToFunc => todo!()
+                    TypeCastKind::FromAnyToFunc => todo!(),
+                    TypeCastKind::FromNullableToAny => {
+                        let type_tag = any_tag_of_type(&expr.ty);
+                        let payload = self.convert_val_to_any_payload(val, &expr.ty);
+                        self.b.build_direct_call(
+                            self.m.get_function(".toany_nullable").unwrap(),
+                            &[self.tys.int.const_int(type_tag, false).into(), payload.into()], 
+                            "").unwrap().try_as_basic_value().unwrap_left()
+                    },
+                    TypeCastKind::FromAnyToNullable => {
+                        let any_val = val.into_struct_value();
+                        assert!(any_val.get_type() == self.tys.any);
+                        let type_tag = self.tys.int.const_int(any_tag_of_type(&e.ty), false);
+                        let payload = self.b.build_direct_call(
+                            self.m.get_function(".fromany_nullable").unwrap(),
+                            &[type_tag.into(), any_val.into()],
+                            "").unwrap().try_as_basic_value().unwrap_left();
+                        self.convert_any_payload_to_type(payload.into_int_value(), &e.ty)
+                    },
+                    TypeCastKind::WrapOption => {
+                        // t -> option t
+                        // if t is a reference, option t is just a nullable pointer (conversion is a no-op)
+                        if expr.ty.is_managed() {
+                            val
+                        } else { todo!() }
+                    },
+                    TypeCastKind::UnwrapOption => {
+                        if e.ty.is_managed() {
+                            let type_tag = self.get_type_tag(&e.ty).into();
+                            self.b.build_direct_call(
+                                self.m.get_function(".unwrap_nullable").unwrap(), 
+                                &[val.into(), type_tag], ""
+                            ).unwrap().try_as_basic_value().unwrap_left()
+                        } else { todo!() }
+                    },
+                    TypeCastKind::OptionToBool => {
+                        if expr.ty.is_managed() {
+                            let cmp = self.b.build_int_compare(IntPredicate::EQ, 
+                                val.into_pointer_value(), self.tys.ptr.const_null(), "").unwrap();
+                            self.b.build_select(cmp, 
+                                self.tys.bool.const_zero(),
+                                self.tys.bool.const_int(1, false), "").unwrap()
+                        } else { todo!() }
+                    }
                 }
             },
             ExprKind::Call(callee_e, args_e) => {
@@ -349,12 +415,6 @@ impl<'a> Compiler<'a> {
         self.ctx.append_basic_block(self.b.get_insert_block().unwrap().get_parent().unwrap(), name)
     }
 
-    fn build_typecast_fail(&self, expected_tag: IntValue<'a>, actual_tag: IntValue<'a>, payload: BasicValueEnum<'a>) {
-        let fail_fn = self.m.get_function("__tc_fail1").unwrap();
-        self.b.build_call(fail_fn, &[expected_tag.into(), actual_tag.into(), payload.into()], "").unwrap();
-        self.b.build_unreachable().unwrap();
-    }
-
     fn lower_ty(&self, ty: &Ty) -> BasicTypeEnum<'a> {
         match ty {
             Ty::Int => self.tys.int.into(),
@@ -363,7 +423,12 @@ impl<'a> Compiler<'a> {
             Ty::Any => self.tys.any.into(),
             Ty::Func(_, _) => self.tys.ptr.into(),
             Ty::UserTy(_) => self.tys.ptr.into(),
-            Ty::Unk | Ty::TyVar(_) | Ty::Named(_) => unreachable!(),
+            Ty::Option(inner) => {
+                if matches!(&**inner, Ty::UserTy(_)) {
+                    self.tys.ptr.into()
+                } else { todo!() }
+            },
+            Ty::Unk | Ty::Var(_) | Ty::Named(_) => unreachable!(),
         }
     }
 
@@ -382,10 +447,18 @@ impl<'a> Compiler<'a> {
             },
             Ty::UserTy(_) =>
                 self.obj_type_tags.get(ty).unwrap().as_pointer_value().const_to_int(self.tys.int),
-            Ty::Unk | Ty::TyVar(_) | Ty::Named(_) => unreachable!()            
+            Ty::Option(_) => {
+                if let Some(g) = self.obj_type_tags.get(ty) {
+                    g.as_pointer_value().const_to_int(self.tys.int)
+                } else {
+                    self.make_option_type_tag(ty)
+                }
+            },
+            Ty::Unk | Ty::Var(_) | Ty::Named(_) => unreachable!()            
         }
     }
 
+    /// See [`crate::rt::TypeDescObj`] and [`crate::rt::FuncDesc`]
     fn make_func_type_tag(&mut self, f: &Ty) -> IntValue<'a> {
         let Ty::Func(ret, params) = f else { panic!(); };
         let size = params.len() as u32 + 3;
@@ -400,9 +473,11 @@ impl<'a> Compiler<'a> {
         func_obj.push(self.tys.int.const_zero()); // terminator
         g.set_initializer(&self.tys.int.const_array(&func_obj));
         g.set_unnamed_addr(true); // allow LLVM to merge identical globals
+        g.set_alignment(8);
         g.as_pointer_value().const_to_int(self.tys.int)
     }
 
+    /// See [`crate::rt::TypeDescObj`] and [`crate::rt::StructDesc`]
     fn make_usertype_type_tag(&mut self, td: &TypeDef) -> IntValue<'a> {
         let t = td.get();
         let size = t.fields.len() as u32 + 3;
@@ -416,6 +491,26 @@ impl<'a> Compiler<'a> {
         }
         obj.push(self.tys.int.const_zero()); // terminator
         g.set_initializer(&self.tys.int.const_array(&obj));
+        g.set_alignment(8);
+        g.as_pointer_value().const_to_int(self.tys.int)
+    }
+
+    /// See [`crate::rt::TypeDescObj`] and [`crate::rt::OptionDesc`]
+    fn make_option_type_tag(&mut self, t: &Ty) -> IntValue<'a> {
+        let inner = match t {
+            Ty::Option(x) => &**x,
+            _ => panic!()
+        };
+        let arr_ty = self.tys.int.array_type(2);
+        let g = self.m.add_global(arr_ty, None, "opttag");
+        let obj = vec![
+            self.tys.int.const_int(4, false),
+            self.get_type_tag(inner)
+        ];
+        self.obj_type_tags.insert(t.clone(), g);
+        g.set_initializer(&self.tys.int.const_array(&obj));
+        g.set_unnamed_addr(true);
+        g.set_alignment(8);
         g.as_pointer_value().const_to_int(self.tys.int)
     }
 
@@ -429,7 +524,8 @@ impl<'a> Compiler<'a> {
             Ty::Func(_, _) => // ptr -> i64
                 self.b.build_ptr_to_int(val.into_pointer_value(), self.tys.int, "").unwrap(),
             Ty::UserTy(_) => todo!(),
-            Ty::Any | Ty::Unk | Ty::TyVar(_) | Ty::Named(_) => unreachable!(),
+            Ty::Option(_) => todo!(),
+            Ty::Any | Ty::Unk | Ty::Var(_) | Ty::Named(_) => unreachable!(),
         }
     }
 
@@ -443,7 +539,8 @@ impl<'a> Compiler<'a> {
             Ty::Func(_, _) => // i64 -> ptr
                 self.b.build_int_to_ptr(payload, self.tys.ptr, "").unwrap().into(),
             Ty::UserTy(_) => todo!(),
-            Ty::Any | Ty::Unk | Ty::TyVar(_) | Ty::Named(_) => unreachable!(),
+            Ty::Option(_) => todo!(),
+            Ty::Any | Ty::Unk | Ty::Var(_) | Ty::Named(_) => unreachable!(),
         }
     }
 
@@ -461,7 +558,8 @@ impl<'a> Compiler<'a> {
                 self.b.build_call(self.m.get_function("__cmp_any").unwrap(), 
                     &[lhs.into(), rhs.into()], "iseq").unwrap().try_as_basic_value().unwrap_left().into_int_value(),
             Ty::UserTy(_) => todo!(),
-            Ty::Unk | Ty::TyVar(_) | Ty::Named(_) => unreachable!(),
+            Ty::Option(_) => todo!(),
+            Ty::Unk | Ty::Var(_) | Ty::Named(_) => unreachable!(),
         }
     }
 
@@ -517,6 +615,19 @@ impl<'a> Compiler<'a> {
             self.b.build_store(refcount_ptr, new_refcount).unwrap();
         } else if ty == &Ty::Any {
             todo!()
+        } else if let Ty::Option(inner) = ty {
+            if let Ty::UserTy(_) = &**inner {
+                // option of a reference type,
+                // if the value is null, do nothing, otherwise dup it ordinarily
+                let cmp = self.b.build_int_compare(IntPredicate::EQ, v.into_pointer_value(), self.tys.ptr.const_null(), "").unwrap();
+                let dup_bb = self.new_bb("");
+                let continue_bb = self.new_bb("");
+                self.b.build_conditional_branch(cmp, continue_bb, dup_bb).unwrap();
+                self.b.position_at_end(dup_bb);
+                self.build_dup(v, inner);
+                self.b.build_unconditional_branch(continue_bb).unwrap();
+                self.b.position_at_end(continue_bb);
+            } else { todo!() }
         } else { unreachable!() }
     }
 
@@ -538,6 +649,19 @@ impl<'a> Compiler<'a> {
             self.b.build_unconditional_branch(continue_bb).unwrap();
             //
             self.b.position_at_end(continue_bb);
+        } else if let Ty::Option(inner) = ty {
+            if let Ty::UserTy(_) = &**inner {
+                // option of a reference type,
+                // if the value is null, do nothing, otherwise drop it ordinarily
+                let cmp = self.b.build_int_compare(IntPredicate::EQ, v.into_pointer_value(), self.tys.ptr.const_null(), "").unwrap();
+                let drop_bb = self.new_bb("");
+                let continue_bb = self.new_bb("");
+                self.b.build_conditional_branch(cmp, continue_bb, drop_bb).unwrap();
+                self.b.position_at_end(drop_bb);
+                self.build_drop(v, inner);
+                self.b.build_unconditional_branch(continue_bb).unwrap();
+                self.b.position_at_end(continue_bb);
+            }
         } else if ty == &Ty::Any {
             todo!()
         } else { unreachable!() }

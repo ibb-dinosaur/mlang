@@ -89,6 +89,7 @@ fn logic_ty(t: &Ty) -> logica::Term {
             make_fty(logic_ty(ret), args)
         }
         Ty::Var(x) => x.0.clone(),
+        Ty::Option(inner) => make_opt(logic_ty(inner)),
     }
 }
 
@@ -151,11 +152,9 @@ impl TypeChecker {
         let q = logica::Term::Comp(
             "list".into(),
             self.tyvars.iter().map(|x| logica::Term::Var(*x)).collect());
-
-        let sol = logica::solve(
-            logica::all(std::mem::take(&mut self.goals)),
-            q
-        ).next().unwrap();
+        let goal = logica::all(std::mem::take(&mut self.goals));
+        println!("{:?}", goal);
+        let sol = logica::solve(goal,q).next().unwrap();
         
         let logica::Term::Comp(_, solution) = sol else { unreachable!() };
         for (lv, t) in self.tyvars.iter().zip(solution) {
@@ -172,9 +171,16 @@ impl TypeChecker {
 
     // `from` must be (implicitly) castable to `to`
     fn restrict_castable(&mut self, from: &logica::Term, to: &logica::Term) {
-        println!("restrict_castable {:?} -> {:?}", from, to);
+        println!("restrict_castable {} -> {}", from, to);
+        let tmp = logica::Term::Var(logica::TVar::new());
         let goal = logica::any([
             logica::unify(from.clone(), to.clone()), // from ~ to
+            logica::unify(to.clone(), make_opt(from.clone())), // from : t, to : option t
+            logica::unify(from.clone(), make_opt(to.clone())), // from : option t, to : t
+            logica::all([  // from : option t, to : bool
+                logica::unify(from.clone(), make_opt(tmp.clone())),
+                logica::unify(to.clone(), logic_ty(&Ty::Bool))
+            ]),
             logica::unify(from.clone(), logic_ty(&Ty::Any)), // from ~ any
             logica::unify(logic_ty(&Ty::Any), to.clone()) // to ~ any
         ]);
@@ -182,13 +188,13 @@ impl TypeChecker {
     }
 
     fn restrict_equal(&mut self, from: &logica::Term, to: &logica::Term) {
-        println!("restrict_equal {:?} ~ {:?}", from, to);
+        println!("restrict_equal {} ~ {}", from, to);
         let goal = logica::unify(from.clone(), to.clone());
         self.goals.push(goal);
     }
 
     fn restrict_field(&mut self, obj: &logica::Term, field_name: &str, field: &logica::Term) {
-        println!("restrict_field {:?}.{} -> {:?}", obj, field_name, field);
+        println!("restrict_field {}.{} -> {}", obj, field_name, field);
         let field_name = field_name.to_string();
         let field = field.clone();
         let goal = logica::project(obj.clone(),
@@ -265,6 +271,12 @@ impl TypeChecker {
                     Literal::Void => Ty::Void,
                     Literal::Int(_) => Ty::Int,
                     Literal::Bool(_) => Ty::Bool,
+                    Literal::Null => { // null : option t
+                        let literal_ty = self.new_tyvar().into();
+                        let t = self.new_tyvar().into();
+                        self.restrict_equal(&literal_ty, &make_opt(t));
+                        Ty::Var(literal_ty.into())
+                    }
                 };
             },
             ExprKind::Var(name) => {
@@ -313,7 +325,7 @@ impl TypeChecker {
                 *expr_type = ty.clone();
             }
             ExprKind::Field(obj, field) => {
-                self.visit_expr(obj);
+                self.visit_and_add_implicit_cast(obj);
                 let obj_ty = logic_ty(&obj.ty);
                 let field_ty = self.new_tyvar().into();
                 self.restrict_field(&obj_ty, field, &field_ty);
@@ -354,6 +366,9 @@ impl TypeChecker {
                             Ty::UserTy(user_types.get(name).unwrap().clone())
                         })
                     }
+                    // reified type variables which haven't been assigned
+                    // a concrete type are written as _.N and are treated as Any
+                    _ if s.starts_with("_.") => Ty::Any,
                     _ => panic!()
                 }
             }
@@ -362,6 +377,8 @@ impl TypeChecker {
                     let ret = self.get_resolved_kr(&args[0]);
                     let args: Vec<_> = args.iter().skip(1).map(|x| self.get_resolved_kr(x)).collect();
                     Ty::Func(Box::new(ret), args.into_boxed_slice())
+                } else if &**f == "opt" {
+                    Ty::Option(Box::new(self.get_resolved_kr(&args[0])))
                 } else { panic!() }
             }
             logica::Term::Var(v) => 
@@ -430,6 +447,7 @@ impl TypeChecker {
                     Literal::Void => Ty::Void,
                     Literal::Int(_) => Ty::Int,
                     Literal::Bool(_) => Ty::Bool,
+                    Literal::Null => self.get_resolved_t(expr_type)
                 }
             },
             ExprKind::Var(name) => {
@@ -508,6 +526,15 @@ fn cast(e: Expr, expected_ty: Ty) -> Expr {
         ExprKind::TypeCast(TypeCastKind::ToAny, Box::new(e)).expr_typed(Ty::Any)
     } else if e.ty == Ty::Any && expected_ty.is_primitive() {
         ExprKind::TypeCast(TypeCastKind::FromAnySimple, Box::new(e)).expr_typed(expected_ty)
+    } else if matches!((&e.ty, &expected_ty), (Ty::Option(_), Ty::Bool)) {
+        // option t -> bool
+        ExprKind::TypeCast(TypeCastKind::OptionToBool, Box::new(e)).expr_typed(expected_ty)
+    } else if expected_ty == Ty::Option(Box::new(e.ty.clone())) {
+        // t -> option t
+        ExprKind::TypeCast(TypeCastKind::WrapOption, Box::new(e)).expr_typed(expected_ty)
+    } else if e.ty == Ty::Option(Box::new(expected_ty.clone())) {
+        // option t -> t
+        ExprKind::TypeCast(TypeCastKind::UnwrapOption, Box::new(e)).expr_typed(expected_ty)
     } else if expected_ty == Ty::Bool {
         // TODO: should arbitrary types be implicitly cast to bool?
         unimplemented!()

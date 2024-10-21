@@ -35,6 +35,11 @@ impl TypeLookup {
                 let args_ty = args.iter().map(|a| self.lookup_ty(a)).collect();
                 Ty::Func(ret_ty, args_ty)
             },
+            Ty::Option(inner) => {
+                let inner_ty = Box::new(self.lookup_ty(inner));
+                assert!(matches!(&*inner_ty, Ty::UserTy(_)));
+                Ty::Option(inner_ty)
+            }
             _ => ty.clone()
         }
     }

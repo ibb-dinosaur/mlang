@@ -35,6 +35,8 @@ pub enum Token {
     KwType,
     #[token("new")]
     KwNew,
+    #[token("null")]
+    KwNull,
     #[token("(")]
     LParen,
     #[token(")")]
@@ -67,6 +69,8 @@ pub enum Token {
     Ne,
     #[token(".")]
     Dot,
+    #[token("?")]
+    QMark,
 }
 
 pub type Spanned<Tok, Loc, Error> = Result<(Loc, Tok, Loc), Error>;

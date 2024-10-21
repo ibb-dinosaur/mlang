@@ -8,6 +8,8 @@ pub enum Ty {
     Bool,
     Any,
     Func(Box<Ty>, Box<[Ty]>),
+    /// option t := t | null, t must not be nullable
+    Option(Box<Ty>),
     #[allow(clippy::enum_variant_names)]
     UserTy(TypeDef),
     #[allow(clippy::enum_variant_names)]
@@ -33,6 +35,9 @@ impl Ty {
 
     /// Managed types are types that are reference counted
     pub fn is_managed(&self) -> bool {
+        if let Ty::Option(inner) = self {
+            return inner.is_managed();
+        }
         matches!(self, Ty::UserTy(_) | Ty::Any)
     }
 
@@ -62,6 +67,7 @@ pub enum ExprKind {
 #[derive(Clone, PartialEq)]
 pub enum Literal {
     Void,
+    Null,
     Int(i64),
     Bool(bool),
 }
@@ -136,6 +142,16 @@ pub enum TypeCastKind {
     FromAnySimple,
     /// Try to cast Any to a specific function type
     FromAnyToFunc,
+    /// Cast from a nullable (option t where t is a reference) to any
+    FromNullableToAny,
+    /// Cast from any to a nullable (option t where t is a reference)
+    FromAnyToNullable,
+    /// Cast from t to option t, cannot fail
+    WrapOption,
+    /// Cast from option t to t (fallible)
+    UnwrapOption,
+    /// Cast from option t to bool (false if null, true otherwise)
+    OptionToBool,
 }
 
 pub enum Statement {
@@ -272,6 +288,7 @@ impl std::fmt::Display for Ty {
             },
             Ty::Named(s) => write!(f, "`{}`", s),
             Ty::UserTy(ty) => write!(f, "{}", ty.get().name),
+            Ty::Option(t) => write!(f, "{}?", t),
         }
     }
 }
@@ -280,6 +297,7 @@ impl Expr {
     fn display(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
             ExprKind::Literal(Literal::Void) => write!(f, "void"),
+            ExprKind::Literal(Literal::Null) => write!(f, "null:{}", self.ty),
             ExprKind::Literal(Literal::Int(i)) => write!(f, "{}", i),
             ExprKind::Literal(Literal::Bool(b)) => write!(f, "{}", b),
             ExprKind::Var(s) => {

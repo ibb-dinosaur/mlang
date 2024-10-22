@@ -38,27 +38,23 @@ impl<'a> Runner<'a> {
     }
 
     // Calls function with 0 or 1 integer arguments, returns an integer result
-    pub unsafe fn test_fn(&self, m: &Module, name: &str, arg: Option<isize>) -> isize {
+    pub fn test_fn(&self, m: &Module, name: &str, arg: Option<isize>) -> Result<isize, String> {
         if !self.is_jit {
-            // use `run_function` because it's safer
+            todo!()
+            /*// use `run_function` because it's safer
             let arg: Option<GenericValue<'a>> = arg.map(|x| self.ctx.i64_type().create_generic_value(x as _, true));
             let result = self.ee.run_function(
                 m.get_function(name).unwrap(),
                 arg.as_ref().as_slice());
-            result.as_int(true) as isize
+            result.as_int(true) as isize*/
         } else {
             // use getFunctionAddress if JITing
-            match arg {
-                None => { // int fn(void)
-                    let f = 
-                        self.ee.get_function::<unsafe extern "C" fn() -> isize>(name).unwrap();
-                    f.call()
-                }
-                Some(x) => { // int fn(int)
-                    let f = 
-                        self.ee.get_function::<unsafe extern "C" fn(isize) -> isize>(name).unwrap();
-                    f.call(x)
-                }
+            assert!(arg.is_none()); // arg not supported on JIT (TODO)
+            assert!(m.get_function(name).unwrap().count_params() == 0);
+            assert!(m.get_function(name).unwrap().get_type().get_return_type().unwrap().is_int_type());
+            unsafe {
+                let main_fn = self.ee.get_function::<unsafe extern "C" fn() -> u64>(name).unwrap().as_raw();
+                crate::rt::rt_run(main_fn).map(|x| x as _)
             }
         }
     }

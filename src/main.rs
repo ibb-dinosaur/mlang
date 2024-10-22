@@ -90,9 +90,10 @@ fn main() {
     if opts.cmd == CliCommand::Run {
         let r = run::Runner::new(&module, opts.jit);
         //rt::RT_ALLOCATOR.lock().unwrap().dump_debug();
-        unsafe {
-            let x = r.test_fn(&module, "main", None);
-            println!("{:?}", x);
+        let x = r.test_fn(&module, "main", None);
+        match x {
+            Ok(x) => println!("{}", x),
+            Err(e) => println!("{}", e)
         }
         //rt::RT_ALLOCATOR.lock().unwrap().dump_debug();
     }

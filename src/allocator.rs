@@ -210,7 +210,8 @@ impl Allocator {
         None
     }
 
-    pub fn dealloc_cheap(&self, alloc_ptr: *mut u8, _alloc_size: usize) {
+    // this operation does not need access to the allocator
+    pub fn dealloc_cheap(alloc_ptr: *mut u8, _alloc_size: usize) {
         // just mark as unused, do nothing else
         BlockPtr::from_content_ptr(alloc_ptr).set_used(false);
     }

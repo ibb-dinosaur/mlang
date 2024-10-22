@@ -1,7 +1,7 @@
 //! Runtime types and functions
 #![allow(unused)]
 
-use std::sync::Mutex;
+use std::{ffi::c_void, sync::Mutex};
 
 use crate::allocator::Allocator;
 
@@ -32,18 +32,16 @@ const ANY_TAG_COMFUN: usize = 15;
 const ANY_TAG_PTR_START: usize = 16;
 
 #[cold]
-pub extern "C" fn __tc_fail1(expected_ty: usize, actual_ty: usize, payload: usize) -> ! {
-    // note: panicking across FFI boundaries is UB
-    panic!("runtime error: implicit type cast failed")
+pub unsafe extern "C" fn __tc_fail1(expected_ty: usize, actual_ty: usize, payload: usize) -> ! {
+    rt_throw_error("runtime error: implicit type-cast failed".to_string())
 }
 
 #[cold]
-pub extern "C" fn __tc_fail_null(expected_ty: usize) -> ! {
-    // note: panicking across FFI boundaries is UB
-    panic!("runtime error: expected non-null value")
+pub unsafe extern "C" fn __tc_fail_null(expected_ty: usize) -> ! {
+    rt_throw_error("runtime error: expected non-null value".to_string())
 }
 
-pub(crate) extern "C" fn __cmp_any(a: AnyT, b: AnyT) -> bool {
+pub(crate) unsafe extern "C" fn __cmp_any(a: AnyT, b: AnyT) -> bool {
     if a.any_tag != b.any_tag {
         return false;
     }
@@ -53,7 +51,7 @@ pub(crate) extern "C" fn __cmp_any(a: AnyT, b: AnyT) -> bool {
         // pointer equality
         ANY_TAG_COMFUN => a.value == b.value,
         // note: panicking across FFI boundaries is UB
-        _ => panic!("internal error: unknown any tag")
+        _ => rt_throw_error("internal error: unknown any tag".to_string())
     }
 }
 
@@ -156,14 +154,47 @@ pub fn init_rt_allocator(mem_size: usize) {
 }
 
 pub extern "C" fn __allocm(size: u64) -> *mut u8 {
-    // allocate managed memory
-    let a = RT_ALLOCATOR.lock().unwrap();
-    let ptr = a.alloc(size as usize).unwrap();
-    // the allocator sets refcount to zero, increase it to one
-    unsafe { Allocator::inc_refcount(ptr); }
-    ptr
+    fn f(size: u64) -> Option<*mut u8> {
+        // allocate managed memory
+        let a = RT_ALLOCATOR.lock().unwrap();
+        let ptr = a.alloc(size as usize)?;
+        // the allocator sets refcount to zero, increase it to one
+        unsafe { Allocator::inc_refcount(ptr); }
+        Some(ptr)
+    }
+    match f(size) {
+        Some(ptr) => ptr,
+        None => unsafe { rt_throw_error("runtime error: could not allocate memory".to_string()) }
+    }
 }
 
-pub extern "C" fn __freem(ptr: *mut u8, size: u64) {
-    RT_ALLOCATOR.lock().unwrap().dealloc_cheap(ptr, size as _);
+pub unsafe extern "C" fn __freem(ptr: *mut u8, size: u64) {
+    Allocator::dealloc_cheap(ptr, size as _);
+}
+
+// the longjmp-exception-mechanism for reporting fatal errors
+extern "C" {
+    fn __callwexcep(save_pointer: *mut *mut c_void, inner_fn: unsafe extern "C" fn() -> u64, inner_result: *mut u64) -> u64;
+    fn __throwexcep(save_pointer: *mut *mut c_void, payload: u64) -> !; // payload should be non-zero
+}
+
+static mut SAVE_POINTER: *mut c_void = std::ptr::null_mut();
+
+/// Run a compiled (JITted) function with the appropriate setup
+pub(crate) unsafe fn rt_run(main: unsafe extern "C" fn() -> u64) -> Result<u64, String> {
+    let mut result = 0u64;
+    let status = __callwexcep(std::ptr::addr_of_mut!(SAVE_POINTER), main, &mut result);
+    SAVE_POINTER = std::ptr::null_mut();
+    if status == 0 {
+        Ok(result)
+    } else {
+        let msg = *Box::from_raw(status as *mut String);
+        Err(msg)
+    }
+}
+
+/// Throw a runtime error, called from Rust functions invoked by JITted code
+unsafe fn rt_throw_error(msg: String) -> ! {
+    let payload = Box::leak(Box::new(msg)) as *mut String as u64;
+    __throwexcep(std::ptr::addr_of_mut!(SAVE_POINTER), payload)
 }

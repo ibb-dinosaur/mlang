@@ -34,6 +34,7 @@ fn main() {
             .write_to_file(out_path.join("bindings.rs"))
             .expect("Couldn't write bindings!");
     */
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     
     lalrpop::process_src().unwrap();
 
@@ -49,6 +50,21 @@ fn main() {
     println!("cargo:rustc-link-search=.");
     println!("cargo:rustc-link-lib=static=llvm-extras");
 
+    // compile asm
+    println!("cargo:rerun-if-changed=src/asm/farjmp.S");
+    if !std::process::Command::new("nasm")
+        .arg("-f").arg("elf64")
+        .arg("-o").arg(out_path.join("farjmp.S.o"))
+        .arg("src/asm/farjmp.S")
+        .status().expect("failed to execute nasm").success() {
+            panic!("failed to assemble farjmp.S");
+        } // to object file
+    cc::Build::new()
+        .object(out_path.join("farjmp.S.o"))
+        .compile("farjmp"); // to static library
+    println!("cargo:rustc-link-lib=static=llvm-extras");
+
+    // compile core.ll to bitcode
     println!("cargo:rerun-if-changed=src/core.ll");
     if !std::process::Command::new("llvm-as-18")
         .arg("src/core.ll")

@@ -1,5 +1,7 @@
 use inkwell::{context::ContextRef, execution_engine::ExecutionEngine, module::Module, targets::{InitializationConfig, Target}, values::GenericValue};
 
+use crate::report::RuntimeError;
+
 pub struct Runner<'a> {
     ctx: ContextRef<'a>,
     ee: ExecutionEngine<'a>,
@@ -38,7 +40,7 @@ impl<'a> Runner<'a> {
     }
 
     // Calls function with 0 or 1 integer arguments, returns an integer result
-    pub fn test_fn(&self, m: &Module, name: &str, arg: Option<isize>) -> Result<isize, String> {
+    pub fn test_fn(&self, m: &Module, name: &str, arg: Option<isize>) -> Result<isize, RuntimeError> {
         if !self.is_jit {
             todo!()
             /*// use `run_function` because it's safer

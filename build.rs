@@ -73,13 +73,4 @@ fn main() {
         .success() {
             panic!("failed to assemble core.ll");
         }
-    if !std::process::Command::new("opt-18")
-        .arg("--Os")
-        .arg("src/core.bc")
-        .arg("-o").arg("src/core.bc")
-        .status()
-        .expect("failed to execute opt-18")
-        .success() {
-            panic!("failed to optimize core.bc");
-        }
 }

@@ -2,7 +2,7 @@ use std::{collections::{BTreeMap, HashMap}, hash::Hasher};
 
 use inkwell::{attributes::{Attribute, AttributeLoc}, basic_block::BasicBlock, builder::Builder, context::Context, module::Module, passes::{PassBuilderOptions, PassManager}, targets::{InitializationConfig, Target, TargetTriple}, types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType, StructType, VoidType}, values::{AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue}, AddressSpace, IntPredicate, OptimizationLevel};
 
-use crate::{ast::*, util::ScopedMap};
+use crate::{ast::*, report::CompileError, util::ScopedMap};
 
 static CORE_BC: &[u8] = include_bytes!("core.bc");
 
@@ -41,41 +41,19 @@ impl<'a> Compiler<'a> {
         Self { ctx, m, b, tys: PrimTypes { int, c_void, any, ptr, bool, int32 }, globals: HashMap::new(), locals: ScopedMap::new(false), obj_type_tags: BTreeMap::new(), user_type_structs: BTreeMap::new() }
     }
 
-    fn declare_builtins(&mut self) {
-        let t1: inkwell::types::FunctionType<'_> = self.tys.c_void.fn_type(&[self.tys.int.into(), self.tys.int.into(), self.tys.int.into()], false);
-        let type_cast_fail_fn = self.m.add_function("__tc_fail1", t1, None);
-        type_cast_fail_fn.add_attribute(AttributeLoc::Function, self.ctx.create_enum_attribute(5, 0)); // cold
-        type_cast_fail_fn.add_attribute(AttributeLoc::Function, self.ctx.create_enum_attribute(33, 0)); // noreturn
-
-        let _cmp_any_fn = self.m.add_function("__cmp_any", 
-            self.tys.bool.fn_type(&[self.tys.any.into(), self.tys.any.into()], false), None);
-    
-        let alloc_fn = self.m.add_function("__allocm", 
-            self.tys.ptr.fn_type(&[self.tys.int.into()], false), None);
-        alloc_fn.add_attribute(AttributeLoc::Function, self.ctx.create_string_attribute("allockind", "alloc"));
-        alloc_fn.add_attribute(AttributeLoc::Function, self.ctx.create_string_attribute("alloc-family", "__allocm"));
-        alloc_fn.add_attribute(AttributeLoc::Function, self.ctx.create_enum_attribute(
-            Attribute::get_named_enum_kind_id("allocsize"), 0));
-        alloc_fn.add_attribute(AttributeLoc::Return, self.ctx.create_enum_attribute(
-            Attribute::get_named_enum_kind_id("nonnull"), 0));
-        alloc_fn.add_attribute(AttributeLoc::Return, self.ctx.create_enum_attribute(
-            Attribute::get_named_enum_kind_id("noundef"), 0));
-    
-        let free_fn = self.m.add_function("__freem",
-            self.tys.c_void.fn_type(&[self.tys.ptr.into(), self.tys.int.into()], false), None);
-        free_fn.add_attribute(AttributeLoc::Function, self.ctx.create_string_attribute("allockind", "free"));
-        free_fn.add_attribute(AttributeLoc::Function, self.ctx.create_string_attribute("alloc-family", "__allocm"));
-    }
-
     fn load_core_ll(&mut self) {
         let buf = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range(CORE_BC, "core.bc");
         let core_mod = self.ctx.create_module_from_ir(buf).unwrap();
-        self.m.link_in_module(core_mod).unwrap();
+        // Using Module::link_in_module removes function declarations from core.ll
+        // so instead just replace the module
+        // self.m.link_in_module(core_mod).unwrap();
+        self.m = core_mod;
+        self.m.set_name("main");
+        self.m.set_source_file_name("main");
         //self.m.print_to_stderr();
     }
 
     pub fn emit_program(mut self, p: &Program) -> inkwell::module::Module<'a> {
-        self.declare_builtins();
         self.load_core_ll();
         // declare all user types
         for td in &p.user_types {
@@ -277,7 +255,7 @@ impl<'a> Compiler<'a> {
                 if op.is_eq_comparison() {
                     let lhs_v = self.emit_expr(lhs, drops);
                     let rhs_v = self.emit_expr(rhs, drops);
-                    let cmp = self.build_eq_comparison(&lhs.ty, lhs_v, rhs_v);
+                    let cmp = self.build_eq_comparison(&lhs.ty, lhs_v, rhs_v, &e.loc);
                     if *op == BinOp::CmpNe {
                         // not
                         self.b.build_int_compare(IntPredicate::EQ, cmp, self.tys.bool.const_zero(), "").unwrap()
@@ -318,9 +296,10 @@ impl<'a> Compiler<'a> {
                         let any_val = val.into_struct_value();
                         assert!(any_val.get_type() == self.tys.any);
                         let type_tag = self.tys.int.const_int(any_tag_of_type(&e.ty), false);
+                        let src_line = self.ctx.i32_type().const_int(e.loc.line_start as _, false);
                         let payload = self.b.build_direct_call(
                             self.m.get_function(".fromany_simple").unwrap(),
-                            &[type_tag.into(), any_val.into()],
+                            &[type_tag.into(), any_val.into(), src_line.into()],
                             "").unwrap().try_as_basic_value().unwrap_left();
                         self.convert_any_payload_to_type(payload.into_int_value(), &e.ty)
                     },
@@ -337,9 +316,10 @@ impl<'a> Compiler<'a> {
                         let any_val = val.into_struct_value();
                         assert!(any_val.get_type() == self.tys.any);
                         let type_tag = self.tys.int.const_int(any_tag_of_type(&e.ty), false);
+                        let src_loc = self.ctx.i32_type().const_int(e.loc.line_start as _, false);
                         let payload = self.b.build_direct_call(
                             self.m.get_function(".fromany_nullable").unwrap(),
-                            &[type_tag.into(), any_val.into()],
+                            &[type_tag.into(), any_val.into(), src_loc.into()],
                             "").unwrap().try_as_basic_value().unwrap_left();
                         self.convert_any_payload_to_type(payload.into_int_value(), &e.ty)
                     },
@@ -353,9 +333,10 @@ impl<'a> Compiler<'a> {
                     TypeCastKind::UnwrapOption => {
                         if e.ty.is_managed() {
                             let type_tag = self.get_type_tag(&e.ty).into();
+                            let src_loc = self.ctx.i32_type().const_int(e.loc.line_start as _, false);
                             self.b.build_direct_call(
                                 self.m.get_function(".unwrap_nullable").unwrap(), 
-                                &[val.into(), type_tag], ""
+                                &[val.into(), type_tag, src_loc.into()], ""
                             ).unwrap().try_as_basic_value().unwrap_left()
                         } else { todo!() }
                     },
@@ -416,7 +397,8 @@ impl<'a> Compiler<'a> {
             ExprKind::Var(name) => {
                 match self.locals.get(name) {
                     Some(place) => *place,
-                    None => panic!("can't assign to globals")
+                    None =>
+                        CompileError::throw("can't assign to globals".to_string(), &e.loc)
                 }
             }
             ExprKind::Field(obj, field) => {
@@ -569,7 +551,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn build_eq_comparison(&mut self, ty: &Ty, lhs: BasicValueEnum<'a>, rhs: BasicValueEnum<'a>) -> IntValue<'a> {
+    fn build_eq_comparison(&mut self, ty: &Ty, lhs: BasicValueEnum<'a>, rhs: BasicValueEnum<'a>, location: &SourceLoc) -> IntValue<'a> {
         match ty {
             Ty::Int => // just int comparison
                 self.b.build_int_compare(IntPredicate::EQ, lhs.into_int_value(), rhs.into_int_value(), "iseq").unwrap(),
@@ -580,8 +562,11 @@ impl<'a> Compiler<'a> {
             Ty::Func(_, _) => // functions are equal if their pointers are equal
                 self.b.build_int_compare(IntPredicate::EQ, lhs.into_pointer_value(), rhs.into_pointer_value(), "iseq").unwrap(),
             Ty::Any => // call a runtime function
+            {
+                let src_line = self.ctx.i32_type().const_int(location.line_start as _, false);
                 self.b.build_call(self.m.get_function("__cmp_any").unwrap(), 
-                    &[lhs.into(), rhs.into()], "iseq").unwrap().try_as_basic_value().unwrap_left().into_int_value(),
+                    &[lhs.into(), rhs.into(), src_line.into()], "iseq").unwrap().try_as_basic_value().unwrap_left().into_int_value()
+            }
             Ty::UserTy(_) => todo!(),
             Ty::Option(_) => todo!(),
             Ty::Unk | Ty::Var(_) | Ty::Named(_) => unreachable!(),

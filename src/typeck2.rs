@@ -8,7 +8,7 @@ Type-checking takes several stages:
 
 use std::{cell::RefCell, collections::HashMap};
 
-use crate::{ast::{Expr, ExprKind, Function, Literal, Program, Statement, Ty, TypeCastKind, TypeDef}, util::ScopedMap};
+use crate::{ast::{Expr, ExprKind, Function, Literal, Program, SourceLoc, Statement, Stmt, Ty, TypeCastKind, TypeDef}, report::CompileError, util::ScopedMap};
 
 fn make_fty(ret: logica::Term, mut args: Vec<logica::Term>) -> logica::Term {
     // ('func' ret args...)
@@ -104,12 +104,12 @@ impl TypeChecker {
             dump_info: false }
     }
 
-    fn get_symbol_type(&self, name: &str) -> logica::Term {
+    fn get_symbol_type(&self, name: &str, loc: &SourceLoc) -> logica::Term {
         match self.vars.get(name) {
             Some(lty) => lty.clone(),
             None => match self.globals.get(name) {
                 Some(gty) => gty.clone(),
-                None => panic!("Unknown symbol: {}", name)
+                None => CompileError::throw(format!("Unknown symbol: {}", name), loc)
             }   
         }
     }
@@ -126,7 +126,7 @@ impl TypeChecker {
             let prev = self.globals.insert(func.name.clone(), 
                 logic_ty(&func.create_ftype()));
             if prev.is_some() {
-                panic!("Duplicate function: {}", func.name);
+                CompileError::throw("Duplicate function definition".to_string(), &func.loc);
             }
         }
         for func in &mut prog.functions {
@@ -160,7 +160,13 @@ impl TypeChecker {
             "list".into(),
             self.tyvars.iter().map(|x| logica::Term::Var(*x)).collect());
         let goal = logica::all(std::mem::take(&mut self.goals));
-        let sol = logica::solve(goal,q).next().unwrap();
+        let sol = match logica::solve(goal,q).next() {
+            Some(x) => x,
+            None => CompileError::throw(
+                format!("Type-checking failed for function {}: no solution found", func.name),
+                &func.loc
+            )
+        };
         
         let logica::Term::Comp(_, solution) = sol else { unreachable!() };
         for (lv, t) in self.tyvars.iter().zip(solution) {
@@ -292,7 +298,7 @@ impl TypeChecker {
                 };
             },
             ExprKind::Var(name) => {
-                *expr_type = Ty::Var(self.get_symbol_type(name).into());
+                *expr_type = Ty::Var(self.get_symbol_type(name, &expr.loc).into());
             },
             ExprKind::BinOp(op, lhs, rhs) => {
                 let lhs_ty = self.visit_and_add_implicit_cast(lhs);
@@ -328,7 +334,7 @@ impl TypeChecker {
             ExprKind::New(ty, args) => {
                 let obj_ty = ty.get_struct().get();
                 if obj_ty.fields.len() != args.len() {
-                    panic!("wrong number of arguments to constructor")
+                    CompileError::throw("wrong number of arguments to constructor".to_string(), &expr.loc);
                 }
                 for i in 0..args.len() {
                     let arg_t = self.visit_and_add_implicit_cast(&mut args[i]);
@@ -463,7 +469,7 @@ impl TypeChecker {
                 }
             },
             ExprKind::Var(name) => {
-                let var_type = self.get_resolved_kr(&self.get_symbol_type(name));
+                let var_type = self.get_resolved_kr(&self.get_symbol_type(name, &expr.loc));
                 value_type = var_type;
             },
             ExprKind::BinOp(op, lhs, rhs) => {
@@ -509,9 +515,13 @@ impl TypeChecker {
                 self.resolve_expr(obj);
                 let resolved_field_ty = match &obj.ty {
                     Ty::UserTy(td) => {
-                        td.get().get_field_ty(field).unwrap().clone()
+                        match td.get().get_field_ty(field) {
+                            Some(ty) => ty.clone(),
+                            None => CompileError::throw(
+                                format!("field {} does not exist on type {}", field, td.get().name), &expr.loc),
+                        }
                     }
-                    _ => panic!()
+                    _ => CompileError::throw("field access on non-struct".to_string(), &expr.loc)
                 };
                 value_type = resolved_field_ty;
             }
@@ -532,27 +542,29 @@ fn insert_cast(e: &mut Expr, expected_ty: Ty) {
 }
 
 fn cast(e: Expr, expected_ty: Ty) -> Expr {
+    let e_loc = e.loc.clone();
     if e.ty == expected_ty {
         e
     } else if expected_ty == Ty::Any {
-        ExprKind::TypeCast(TypeCastKind::ToAny, Box::new(e)).expr_typed(Ty::Any)
+        ExprKind::TypeCast(TypeCastKind::ToAny, Box::new(e)).expr_typed(Ty::Any).located(e_loc)
     } else if e.ty == Ty::Any && expected_ty.is_primitive() {
-        ExprKind::TypeCast(TypeCastKind::FromAnySimple, Box::new(e)).expr_typed(expected_ty)
+        ExprKind::TypeCast(TypeCastKind::FromAnySimple, Box::new(e)).expr_typed(expected_ty).located(e_loc)
     } else if matches!((&e.ty, &expected_ty), (Ty::Option(_), Ty::Bool)) {
         // option t -> bool
-        ExprKind::TypeCast(TypeCastKind::OptionToBool, Box::new(e)).expr_typed(expected_ty)
+        ExprKind::TypeCast(TypeCastKind::OptionToBool, Box::new(e)).expr_typed(expected_ty).located(e_loc)
     } else if expected_ty == Ty::Option(Box::new(e.ty.clone())) {
         // t -> option t
-        ExprKind::TypeCast(TypeCastKind::WrapOption, Box::new(e)).expr_typed(expected_ty)
+        ExprKind::TypeCast(TypeCastKind::WrapOption, Box::new(e)).expr_typed(expected_ty).located(e_loc)
     } else if e.ty == Ty::Option(Box::new(expected_ty.clone())) {
         // option t -> t
-        ExprKind::TypeCast(TypeCastKind::UnwrapOption, Box::new(e)).expr_typed(expected_ty)
+        ExprKind::TypeCast(TypeCastKind::UnwrapOption, Box::new(e)).expr_typed(expected_ty).located(e_loc)
     } else if expected_ty == Ty::Bool {
         // TODO: should arbitrary types be implicitly cast to bool?
         unimplemented!()
     }/*else if e.ty == Ty::Any && expected_ty.is_func() {
         ExprKind::TypeCast(TypeCastKind::FromAnyToFunc, Box::new(e)).expr_typed(expected_ty)
     }*/ else {
-        panic!("Static type error: cannot cast from {:?} to {:?}", e.ty, expected_ty)
+        CompileError::throw(
+            format!("Static type error: cannot cast from {:?} to {:?}", e.ty, expected_ty), &e.loc)
     }
 }

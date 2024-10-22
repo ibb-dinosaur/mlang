@@ -3,7 +3,7 @@
 
 use std::{ffi::c_void, sync::Mutex};
 
-use crate::allocator::Allocator;
+use crate::{allocator::Allocator, report::RuntimeError};
 
 /// The `any` type
 /// 16 bytes, first word = tag, second word = actual value (can be scalar or pointer)
@@ -32,16 +32,16 @@ const ANY_TAG_COMFUN: usize = 15;
 const ANY_TAG_PTR_START: usize = 16;
 
 #[cold]
-pub unsafe extern "C" fn __tc_fail1(expected_ty: usize, actual_ty: usize, payload: usize) -> ! {
-    rt_throw_error("runtime error: implicit type-cast failed".to_string())
+pub unsafe extern "C" fn __tc_fail1(expected_ty: usize, actual_ty: usize, payload: usize, source_line: u32) -> ! {
+    rt_throw_error("runtime error: implicit type-cast failed".to_string(), source_line)
 }
 
 #[cold]
-pub unsafe extern "C" fn __tc_fail_null(expected_ty: usize) -> ! {
-    rt_throw_error("runtime error: expected non-null value".to_string())
+pub unsafe extern "C" fn __tc_fail_null(expected_ty: usize, source_line: u32) -> ! {
+    rt_throw_error("runtime error: expected non-null value".to_string(), source_line)
 }
 
-pub(crate) unsafe extern "C" fn __cmp_any(a: AnyT, b: AnyT) -> bool {
+pub(crate) unsafe extern "C" fn __cmp_any(a: AnyT, b: AnyT, source_line: u32) -> bool {
     if a.any_tag != b.any_tag {
         return false;
     }
@@ -51,7 +51,7 @@ pub(crate) unsafe extern "C" fn __cmp_any(a: AnyT, b: AnyT) -> bool {
         // pointer equality
         ANY_TAG_COMFUN => a.value == b.value,
         // note: panicking across FFI boundaries is UB
-        _ => rt_throw_error("internal error: unknown any tag".to_string())
+        _ => rt_throw_error("internal error: unknown any tag".to_string(), source_line)
     }
 }
 
@@ -164,7 +164,8 @@ pub extern "C" fn __allocm(size: u64) -> *mut u8 {
     }
     match f(size) {
         Some(ptr) => ptr,
-        None => unsafe { rt_throw_error("runtime error: could not allocate memory".to_string()) }
+        None => unsafe { rt_throw_error("runtime error: could not allocate memory".to_string(),
+        0) } // don't save source line info for allocations, allocation failure should be rare and not the user's fault
     }
 }
 
@@ -181,20 +182,21 @@ extern "C" {
 static mut SAVE_POINTER: *mut c_void = std::ptr::null_mut();
 
 /// Run a compiled (JITted) function with the appropriate setup
-pub(crate) unsafe fn rt_run(main: unsafe extern "C" fn() -> u64) -> Result<u64, String> {
+pub(crate) unsafe fn rt_run(main: unsafe extern "C" fn() -> u64) -> Result<u64, RuntimeError> {
     let mut result = 0u64;
     let status = __callwexcep(std::ptr::addr_of_mut!(SAVE_POINTER), main, &mut result);
     SAVE_POINTER = std::ptr::null_mut();
     if status == 0 {
         Ok(result)
     } else {
-        let msg = *Box::from_raw(status as *mut String);
+        let msg = *Box::from_raw(status as *mut RuntimeError);
         Err(msg)
     }
 }
 
 /// Throw a runtime error, called from Rust functions invoked by JITted code
-unsafe fn rt_throw_error(msg: String) -> ! {
-    let payload = Box::leak(Box::new(msg)) as *mut String as u64;
+unsafe fn rt_throw_error(msg: String, source_line: u32) -> ! {
+    let err = RuntimeError::new(msg, source_line);
+    let payload = Box::leak(err) as *mut RuntimeError as u64;
     __throwexcep(std::ptr::addr_of_mut!(SAVE_POINTER), payload)
 }

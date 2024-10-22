@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::*;
+use crate::{ast::*, report::CompileError};
 
 pub struct TypeLookup {
     type_dict: HashMap<String, Ty>
@@ -27,16 +27,19 @@ impl TypeLookup {
         }
     }
 
-    fn lookup_ty(&self, ty: &Ty) -> Ty {
+    fn lookup_ty(&self, ty: &Ty, loc: &SourceLoc) -> Ty {
         match ty {
-            Ty::Named(name) => self.type_dict.get(name).unwrap().clone(),
+            Ty::Named(name) => match self.type_dict.get(name) {
+                Some(ty) => ty.clone(),
+                None => CompileError::throw(format!("Type {} does not exist", name), loc)
+            }
             Ty::Func(ret, args) => {
-                let ret_ty = Box::new(self.lookup_ty(ret));
-                let args_ty = args.iter().map(|a| self.lookup_ty(a)).collect();
+                let ret_ty = Box::new(self.lookup_ty(ret, loc));
+                let args_ty = args.iter().map(|a| self.lookup_ty(a, loc)).collect();
                 Ty::Func(ret_ty, args_ty)
             },
             Ty::Option(inner) => {
-                let inner_ty = Box::new(self.lookup_ty(inner));
+                let inner_ty = Box::new(self.lookup_ty(inner, loc));
                 assert!(matches!(&*inner_ty, Ty::UserTy(_)));
                 Ty::Option(inner_ty)
             }
@@ -51,15 +54,16 @@ impl TypeLookup {
         // 2. find all NamedTypes and replace them
         for typedef in &p.user_types {
             let mut typedef = typedef.get_mut();
+            let loc = typedef.loc.clone();
             for (_, field_ty) in &mut typedef.fields {
-                *field_ty = self.lookup_ty(field_ty);
+                *field_ty = self.lookup_ty(field_ty, &loc);
             }
         }
         for func in &mut p.functions {
             for (_, ty) in &mut func.params {
-                *ty = self.lookup_ty(ty);
+                *ty = self.lookup_ty(ty, &func.loc);
             }
-            func.return_type = self.lookup_ty(&func.return_type);
+            func.return_type = self.lookup_ty(&func.return_type, &func.loc);
             for stmt in &mut func.body {
                 self.lookup_in_stmt(stmt);
             }
@@ -100,7 +104,7 @@ impl TypeLookup {
             },
             ExprKind::New(ty, args) => {
                 args.iter_mut().for_each(|a| self.lookup_in_expr(a));
-                *ty = self.lookup_ty(ty);
+                *ty = self.lookup_ty(ty, &expr.loc);
             }
             ExprKind::Field(obj, _) => {
                 self.lookup_in_expr(obj);

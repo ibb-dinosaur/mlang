@@ -55,7 +55,8 @@ impl SemanticPreTypingChecker {
             if does_every_branch_return(&f.body) {
                 // ok
             } else {
-                panic!("function {} missing return statement", f.name);
+                CompileError::throw(
+                    "function missing return statement".to_string(), &f.loc);
             }
         } else if !matches!(f.body.last().map(|s| &s.s), Some(Statement::Return(_))) {
             // if function type is void, insert implicit return at the end
@@ -71,7 +72,7 @@ impl SemanticPreTypingChecker {
                     // valid lhs: variable, field
                     match lhs.kind {
                         ExprKind::Var(_) | ExprKind::Field(_, _) => {},
-                        _ => panic!("invalid left-hand side of assignment")
+                        _ => CompileError::throw("invalid left-hand side of assignment".to_string(), &lhs.loc)
                     }
                 },
                 Statement::If(_, then_, else_) => {

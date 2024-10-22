@@ -20,6 +20,7 @@ mod llvm_extras;
 mod util;
 mod refcountpass;
 mod run;
+mod report;
 //mod gccjit;
 //mod mir;
 
@@ -93,7 +94,7 @@ fn main() {
         let x = r.test_fn(&module, "main", None);
         match x {
             Ok(x) => println!("{}", x),
-            Err(e) => println!("{}", e)
+            Err(e) => e.print(),
         }
         //rt::RT_ALLOCATOR.lock().unwrap().dump_debug();
     }

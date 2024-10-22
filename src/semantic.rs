@@ -1,14 +1,14 @@
 //! Various semantic checks for the AST
 
-use crate::ast::{ExprKind, Function, Program, Statement, Ty};
+use crate::{ast::{ExprKind, Function, Program, Statement, Stmt, Ty}, report::CompileError};
 
 pub struct SemanticPreTypingChecker {
 
 }
 
-fn has_return_recursive(stmts: &[Statement]) -> bool {
+fn has_return_recursive(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| {
-        match s {
+        match &s.s {
             Statement::Return(_) => true,
             Statement::If(_, then_, else_) => 
                 has_return_recursive(then_) || has_return_recursive(else_),
@@ -17,8 +17,8 @@ fn has_return_recursive(stmts: &[Statement]) -> bool {
     })
 }
 
-fn does_every_branch_return(stmts: &[Statement]) -> bool {
-    match stmts.last() {
+fn does_every_branch_return(stmts: &[Stmt]) -> bool {
+    match stmts.last().map(|s| &s.s) {
         Some(Statement::Return(_)) => true,
         Some(Statement::If(_, then_, else_)) =>
             does_every_branch_return(then_) && does_every_branch_return(else_),
@@ -57,16 +57,16 @@ impl SemanticPreTypingChecker {
             } else {
                 panic!("function {} missing return statement", f.name);
             }
-        } else if !matches!(f.body.last(), Some(Statement::Return(_))) {
+        } else if !matches!(f.body.last().map(|s| &s.s), Some(Statement::Return(_))) {
             // if function type is void, insert implicit return at the end
-            f.body.push(Statement::Return(
-                ExprKind::Literal(crate::ast::Literal::Void).expr_typed(Ty::Void)));
+            f.body.push(Stmt::new(Statement::Return(
+                ExprKind::Literal(crate::ast::Literal::Void).expr_typed(Ty::Void))));
         }
     }
 
-    fn check_assignment_lhs(&mut self, stmts: &[Statement]) {
+    fn check_assignment_lhs(&mut self, stmts: &[Stmt]) {
         for s in stmts {
-            match s {
+            match &s.s {
                 Statement::Assign(lhs, _) => {
                     // valid lhs: variable, field
                     match lhs.kind {

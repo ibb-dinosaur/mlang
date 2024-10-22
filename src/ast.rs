@@ -74,36 +74,64 @@ pub enum Literal {
 
 impl ExprKind {
     pub fn expr(self) -> Expr {
-        Expr { ty: Ty::Unk, kind: self, extra: None }
+        Expr { ty: Ty::Unk, kind: self, loc: SourceLoc::default() }
     }
 
     pub fn expr_typed(self, ty: Ty) -> Expr {
-        Expr { ty, kind: self, extra: None }
+        Expr { ty, kind: self, loc: SourceLoc::default() }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SourceLoc {
+    // file name
+    pub line_start: u32,
+    pub col_start: u32,
+    pub line_end: u32,
+    pub col_end: u32,
+}
+
+impl From<(crate::lexer::LexerLoc, crate::lexer::LexerLoc)> for SourceLoc {
+    fn from((start, end): (crate::lexer::LexerLoc, crate::lexer::LexerLoc)) -> Self {
+        SourceLoc {
+            line_start: start.line,
+            col_start: start.col,
+            line_end: end.line,
+            col_end: end.col,
+        }
+    }
+}
+
+impl SourceLoc {
+    pub fn new_merged(start: &SourceLoc, end: &SourceLoc) -> Self {
+        SourceLoc {
+            line_start: start.line_start,
+            col_start: start.col_start,
+            line_end: end.line_end,
+            col_end: end.col_end,
+        }
     }
 }
 
 pub struct Expr {
     pub ty: Ty,  // The type of the expression
     pub kind: ExprKind,   // The actual kind of expression
-    /// Arbitrary extra data that can be attached to an expression during analysis
-    pub extra: Option<Box<dyn std::any::Any>>,
+    pub loc: SourceLoc,
+    // Arbitrary extra data that can be attached to an expression during analysis
+    //pub extra: Option<Box<dyn std::any::Any>>,
 }
 
 impl Expr {
-    pub fn set_extra<T: 'static>(&mut self, extra: T) {
-        debug_assert!(self.extra.is_none());
-        self.extra = Some(Box::new(extra));
-    }
-
-    pub fn get_extra<T: 'static>(&self) -> Option<&T> {
-        self.extra.as_ref().and_then(|b| b.downcast_ref())
+    pub fn located(mut self, loc: impl Into<SourceLoc>) -> Self {
+        self.loc = loc.into();
+        self
     }
 }
 
 // mostly to allow for std::mem::take 
 impl std::default::Default for Expr {
     fn default() -> Self {
-        Expr { ty: Ty::Unk, kind: ExprKind::Literal(Literal::Void), extra: None }
+        Expr { ty: Ty::Unk, kind: ExprKind::Literal(Literal::Void), loc: SourceLoc::default() }
     }
 }
 
@@ -159,7 +187,7 @@ pub enum Statement {
     Return(Expr),         // Return statement
     Let(String, Expr),    // Variable declaration and assignment
     Assign(Expr, Expr),
-    If(Expr, Vec<Statement>, Vec<Statement>),
+    If(Expr, Vec<Stmt>, Vec<Stmt>),
     /// Drop expressions at the end of scope (block or function).
     /// Must be the last statement in a block. (It should be the last statement of every block)
     /// 
@@ -169,11 +197,38 @@ pub enum Statement {
     RcDropsReturn { drops: Vec<Expr>, returns: Option<Box<Expr>> },
 }
 
+pub struct Stmt {
+    pub s: Statement,
+    pub loc: SourceLoc,
+    /// Arbitrary extra data that can be attached to an expression during analysis
+    pub extra: Option<Box<dyn std::any::Any>>,
+}
+
+impl Stmt {
+    pub fn new(s: Statement) -> Self {
+        Stmt { s, loc: SourceLoc::default(), extra: None }
+    }
+
+    pub fn set_extra<T: 'static>(&mut self, extra: T) {
+        debug_assert!(self.extra.is_none());
+        self.extra = Some(Box::new(extra));
+    }
+
+    pub fn get_extra<T: 'static>(&self) -> Option<&T> {
+        self.extra.as_ref().and_then(|b| b.downcast_ref())
+    }
+
+    pub fn located(s: Statement, loc: impl Into<SourceLoc>) -> Self {
+        Stmt { s, loc: loc.into(), extra: None }
+    }
+}
+
 pub struct Function {
     pub name: String,
     pub params: Vec<(String, Ty)>,
     pub return_type: Ty,
-    pub body: Vec<Statement>,  // Multiple statements in function body
+    pub body: Vec<Stmt>,  // Multiple statements in function body
+    pub loc: SourceLoc,
 }
 
 impl Function {
@@ -185,7 +240,8 @@ impl Function {
 #[derive(Debug)]
 pub struct TypeDefinition {
     pub name: String,
-    pub fields: Vec<(String, Ty)>
+    pub fields: Vec<(String, Ty)>,
+    pub loc: SourceLoc
 }
 
 impl TypeDefinition {
@@ -381,13 +437,13 @@ impl Statement {
                 cond.display(f)?;
                 writeln!(f, " {{")?;
                 for stmt in then_ {
-                    stmt.display(f)?;
+                    stmt.s.display(f)?;
                     writeln!(f)?;
                 }
                 if !else_.is_empty() {
                     writeln!(f, "}} else {{")?;
                     for stmt in else_ {
-                        stmt.display(f)?;
+                        stmt.s.display(f)?;
                         writeln!(f)?;
                     }
                 }
@@ -421,7 +477,7 @@ impl std::fmt::Display for Function {
         }
         writeln!(f, ") -> {} {{", self.return_type)?;
         for stmt in &self.body {
-            stmt.display(f)?;
+            stmt.s.display(f)?;
             writeln!(f)?;
         }
         writeln!(f, "}}")

@@ -1,16 +1,20 @@
+use std::ops::Range;
+
 use logos::{Logos, SpannedIter};
 
 #[derive(Logos, Debug, Clone)]
 #[logos(skip "[ \t]*")]
-#[logos(skip "\\/\\*[^*]*\\*+([^/*][^*]*\\*+)*\\/")] // C-style comments
 #[logos(error = LexerError)]
+#[logos(extras = LineCounter)]
 pub enum Token {
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Ident(String),
     #[regex(r"0|[1-9][0-9]*", |lex| lex.slice().parse::<i64>().unwrap())]
     Int(i64),
-    #[regex(r"\r?\n\s*")]
+    #[regex(r"\r?\n\s*", newline_callback)]
     Nl,
+    #[regex(r"\/\*[^*]*\*+([^/*][^*]*\*+)*\/", multiline_comment_callback)] // C-style comments
+    MultiLineComment,
     #[token("fun")]
     KwFun,
     #[token("return")]
@@ -73,6 +77,55 @@ pub enum Token {
     QMark,
 }
 
+fn newline_callback(lex: &mut logos::Lexer<Token>) {
+    lex.slice().chars().for_each(|c| {
+        if c == '\n' {
+            lex.extras.line += 1;
+        }
+    });
+    lex.extras.line_start_char = lex.span().start;
+}
+
+fn multiline_comment_callback(lex: &mut logos::Lexer<Token>) -> logos::Skip {
+    // count newlines in the comment
+    let st = lex.span().start;
+    lex.slice().chars().enumerate().for_each(|(i, c)| {
+        if c == '\n' {
+            lex.extras.line += 1;
+            lex.extras.line_start_char = st + i;
+        }
+    });
+    logos::Skip
+}
+
+pub struct LineCounter {
+    line: usize,
+    line_start_char: usize,
+}
+
+impl std::default::Default for LineCounter {
+    fn default() -> Self {
+        Self { line: 1, line_start_char: 0 }
+    }
+}
+
+impl LineCounter {
+    pub fn get_locations(&self, span: &Range<usize>) -> (LexerLoc, LexerLoc) {
+        let start = span.start + 1 - self.line_start_char;
+        let end = span.end + 1 - self.line_start_char;
+        (
+            LexerLoc { line: self.line as u32, col: start as u32, },
+            LexerLoc { line: self.line as u32, col: end as u32, },
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LexerLoc {
+    pub line: u32,
+    pub col: u32,
+}
+
 pub type Spanned<Tok, Loc, Error> = Result<(Loc, Tok, Loc), Error>;
 
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -91,11 +144,16 @@ impl<'input> Lexer<'input> {
 }
 
 impl<'input> Iterator for Lexer<'input> {
-    type Item = Spanned<Token, usize, LexerError>;
+    type Item = Spanned<Token, LexerLoc, LexerError>;
   
     fn next(&mut self) -> Option<Self::Item> {
-      self.token_stream
-        .next()
-        .map(|(token, span)| Ok((span.start, token?, span.end)))
+        let (res, span) = self.token_stream.next()?;
+        match res {
+            Err(err) => Some(Err(err)),
+            Ok(token) => {
+                let (loc1, loc2) = self.token_stream.extras.get_locations(&span);
+                Some(Ok((loc1, token, loc2)))
+            }
+        }
     }
 }

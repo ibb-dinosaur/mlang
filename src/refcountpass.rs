@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use crate::{ast::{Expr, ExprKind, Function, Program, Statement, Ty}, util::HashMapExt};
+use crate::{ast::{Expr, ExprKind, Function, Program, Statement, Stmt, Ty}, util::HashMapExt};
 
 fn make_dup(e: &mut Expr) {
     if !e.ty.is_managed() {
@@ -96,8 +96,8 @@ impl RefCountPass2 {
         }
     }
 
-    fn visit_stmt(&mut self, s: &mut Statement, used_vars: &mut HashMap<String, Ty>, defined_vars: &mut HashMap<String, Ty>) {
-        match s {
+    fn visit_stmt(&mut self, s: &mut Stmt, used_vars: &mut HashMap<String, Ty>, defined_vars: &mut HashMap<String, Ty>) {
+        match &mut s.s {
             Statement::ExprStmt(e) => {
                 // this is basically a `discard` statement
                 self.visit_expr(e, false, used_vars);
@@ -125,11 +125,11 @@ impl RefCountPass2 {
                     used_vars.insert(v.0.clone(), v.1.clone());
                 }
                 // vars used in just one block are also considered used, but must be dropped in the other block
-                let else_block_drops = match else_.last_mut() {
+                let else_block_drops = match else_.last_mut().map(|s| &mut s.s) {
                     Some(Statement::RcDropsReturn { drops, .. }) => drops,
                     _ => unreachable!()
                 };
-                let then_block_drops = match then_.last_mut() {
+                let then_block_drops = match then_.last_mut().map(|s| &mut s.s) {
                     Some(Statement::RcDropsReturn { drops, .. }) => drops,
                     _ => unreachable!()
                 };
@@ -154,7 +154,7 @@ impl RefCountPass2 {
     /// 
     /// Returns variables defined in an outer scope which are used in this block
     // `extra_defs` are variables which should be treated as defined in this block
-    fn visit_block(&mut self, stmts: &mut Vec<Statement>, extra_defs: Option<HashMap<String,Ty>>) -> HashMap<String, Ty> {
+    fn visit_block(&mut self, stmts: &mut Vec<Stmt>, extra_defs: Option<HashMap<String,Ty>>) -> HashMap<String, Ty> {
         let mut defined_vars = extra_defs.unwrap_or_default(); // vars defined in this scope (block)
         let mut used_vars = HashMap::new();
         for s in stmts.iter_mut().rev() {
@@ -167,12 +167,13 @@ impl RefCountPass2 {
             .map(|v| {
                 ExprKind::Var(v.0.clone()).expr_typed(v.1.clone())
             }).collect();
-        if let Some(Statement::Return(ret_val)) = stmts.last_mut() {
+        if let Some(Stmt { s: Statement::Return(ret_val), loc, .. }) = stmts.last_mut() {
             let ret_val = std::mem::take(ret_val);
-            *stmts.last_mut().unwrap() = Statement::RcDropsReturn { drops, returns: Some(Box::new(ret_val)) };
+            *stmts.last_mut().unwrap() = Stmt::located(
+                Statement::RcDropsReturn { drops, returns: Some(Box::new(ret_val)) }, loc.clone());
         } else {
             // no return
-            stmts.push(Statement::RcDropsReturn { drops, returns: None });
+            stmts.push(Stmt::new(Statement::RcDropsReturn { drops, returns: None }));
         }
         // variables which are used but not defined must be from an outer scope
         for v in defined_vars {
@@ -207,9 +208,9 @@ impl DropPropagationPass {
         }
     }
 
-    fn visit_block(&mut self, stmts: &mut [Statement]) {
+    fn visit_block(&mut self, stmts: &mut [Stmt]) {
         let parent_drops_save = self.parent_drops.clone();
-        if let Statement::RcDropsReturn { drops, .. }  = stmts.last_mut().unwrap() {
+        if let Statement::RcDropsReturn { drops, .. }  = stmts.last_mut().map(|s| &mut s.s).unwrap() {
             // drop parent blocks' drops
             for (name, ty) in &self.parent_drops {
                 drops.push(ExprKind::Var(name.clone()).expr_typed(ty.clone()));
@@ -225,7 +226,7 @@ impl DropPropagationPass {
         // visit children blocks
         for s in stmts.iter_mut() {
             #[allow(clippy::single_match)]
-            match s {
+            match &mut s.s {
                 Statement::If(_, then_, else_) => {
                     self.visit_block(then_);
                     self.visit_block(else_);

@@ -158,11 +158,11 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn emit_statement(&mut self, s: &Statement) {
+    fn emit_statement(&mut self, s: &Stmt) {
         let mut drops = vec![];
         // return after drops
         let mut late_return = None;
-        match s {
+        match &s.s {
             Statement::ExprStmt(expr) => {
                 self.emit_expr(expr, &mut drops);
             },

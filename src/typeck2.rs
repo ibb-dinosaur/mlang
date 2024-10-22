@@ -228,8 +228,8 @@ impl TypeChecker {
         self.goals.push(goal);
     }
 
-    fn visit_stmt(&mut self, stmt: &mut Statement) {
-        match stmt {
+    fn visit_stmt(&mut self, stmt: &mut Stmt) {
+        match &mut stmt.s {
             Statement::ExprStmt(expr) => {
                 self.visit_expr(expr);
             }
@@ -246,7 +246,7 @@ impl TypeChecker {
                 self.vars.insert_new(name.clone(), var_ty.clone());
                 self.restrict_castable(&rhs_ty, &var_ty);
                 // save the typevar assigned to this variable
-                expr.set_extra(var_ty);
+                stmt.set_extra(var_ty);
             }
             Statement::Assign(lhs, expr) => {
                 self.visit_expr(lhs);
@@ -411,8 +411,8 @@ impl TypeChecker {
         }
     }
 
-    fn resolve_stmt(&mut self, stmt: &mut Statement) {
-        match stmt {
+    fn resolve_stmt(&mut self, stmt: &mut Stmt) {
+        match &mut stmt.s {
             Statement::ExprStmt(expr) => {
                 self.resolve_expr(expr);
             }
@@ -423,7 +423,7 @@ impl TypeChecker {
             }
             Statement::Let(_, expr) => {
                 // restore the type var assigned to this variable
-                let var_ty= expr.get_extra::<logica::Term>().unwrap().clone();
+                let var_ty= stmt.extra.take().unwrap().downcast().unwrap();
                 self.resolve_expr(expr);
                 insert_cast(expr, self.get_resolved_kr(&var_ty));
             }

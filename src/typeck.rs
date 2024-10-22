@@ -67,8 +67,8 @@ impl TypeLookup {
         //p.type_map = self.type_dict;
     }
 
-    fn lookup_in_stmt(&self, stmt: &mut Statement) {
-        match stmt {
+    fn lookup_in_stmt(&self, stmt: &mut Stmt) {
+        match &mut stmt.s {
             Statement::ExprStmt(expr)
             | Statement::Return(expr)
             | Statement::Let(_, expr) => {

@@ -17,23 +17,24 @@ Def: Either<TypeDefinition, Function> = {
 }
 
 TypeDef: TypeDefinition = {
-    "type" <name:ident> "=" nl <fields:(<Param> nl)*> "end" nl* => {
-        TypeDefinition { name, fields }
+    "type" <name:LocIdent> "=" nl <fields:(<Param> nl)*> "end" nl* => {
+        TypeDefinition { name: name.0, fields, loc: name.1 }
     }
 }
  
 Func: Function = {
-    "fun" <name:ident> "(" <params:CommaList<Param>> ")" <ret: (":" <TyExpr>)?> <body:FuncBody> nl* => {
+    "fun" <name:LocIdent> "(" <params:CommaList<Param>> ")" <ret: (":" <TyExpr>)?> <body:FuncBody> nl* => {
         Function {
-            name,
+            name: name.0,
             params,
             return_type: ret.unwrap_or(Ty::Unk),
             body,
+            loc: name.1
         }
     }
 }
 
-FuncBody: Vec<Statement> = {
+FuncBody: Vec<Stmt> = {
     "end" => vec![],
     nl <b:Block> "end" => b,
 }
@@ -54,33 +55,37 @@ TyExpr: Ty = {
     TyName
 }
 
-Block: Vec<Statement> = {
-    <stmts: (<Stmt> nl+)*> => {
+Block: Vec<Stmt> = {
+    <stmts: (<LocS<Stmt>> nl+)*> => {
         stmts
     }
 }
 
 Stmt: Statement = {
     IfStmt,
-    "return" <e:Expr> => Statement::Return(e),
-    "let" <name:ident> "=" <e:Expr> => Statement::Let(name, e),
-    <lhs:Expr> "=" <e:Expr> => Statement::Assign(lhs, e),
-    <e:Expr> => Statement::ExprStmt(e)
+    "return" <e:Loc<Expr>> => Statement::Return(e),
+    "let" <name:ident> "=" <e:Loc<Expr>> => Statement::Let(name, e),
+    <lhs:Loc<Expr>> "=" <e:Loc<Expr>> => Statement::Assign(lhs, e),
+    <e:Loc<Expr>> => Statement::ExprStmt(e)
 }
 
 IfStmt: Statement = {
-    "if" <cond:Expr> "then" nl <then:Block> <elseifs:ElseIf*> <else_:("else" nl <Block>)?> "end" => {
+    "if" <cond:Loc<Expr>> "then" nl <then:Block> <elseifs:ElseIf*> <else_:("else" nl <Block>)?> "end" => {
         let else_ = else_.unwrap_or(vec![]);
         let mut elseifs = elseifs;
         elseifs.insert(0, (cond, then));
         elseifs.into_iter().rev().fold(else_, |else_, (cond, then)| {
-            vec![Statement::If(cond, then, else_)]
-        }).pop().unwrap()
+            let loc = match else_.last() {
+                Some(s) => SourceLoc::new_merged(&cond.loc, &s.loc),
+                None => cond.loc.clone(),
+            };
+            vec![Stmt::located(Statement::If(cond, then, else_), loc)]
+        }).pop().unwrap().s
     }
 }
 
-ElseIf: (Expr, Vec<Statement>) = {
-    "elseif" <cond:Expr> "then" nl <then:Block> => (cond, then),
+ElseIf: (Expr, Vec<Stmt>) = {
+    "elseif" <cond:Loc<Expr>> "then" nl <then:Block> => (cond, then),
 }
 
 Expr: Expr = {
@@ -88,23 +93,23 @@ Expr: Expr = {
 };
 
 CmpExpr: Expr = {
-    <lhs:AddExpr> <op:CmpOp> <rhs:AddExpr> => ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)).expr(),
+    <lhs:Loc<AddExpr>> <op:CmpOp> <rhs:Loc<AddExpr>> => ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)).expr(),
     AddExpr
 }
 
 AddExpr: Expr = {
-    BinOpL<Factor, AddOp>
+    BinOpL<Loc<Factor>, AddOp>
 }
 
 Factor: Expr = {
-    BinOpL<Call, MulOp>
+    BinOpL<Loc<Call>, MulOp>
 }
 
 Call: Expr = {
-    <a:Atom> "(" <args:CommaList<Expr>> ")" => ExprKind::Call(Box::new(a), args).expr(),
-    "new" <ty:ident> "(" <args:CommaList<Expr>> ")" => ExprKind::New(Ty::Named(ty), args).expr(),
-    <obj:Call> "." <field:ident> => ExprKind::Field(Box::new(obj), field).expr(),
-    <a:Atom> => a,
+    <a:Loc<Atom>> "(" <args:CommaList<Loc<Expr>>> ")" => ExprKind::Call(Box::new(a), args).expr(),
+    "new" <ty:ident> "(" <args:CommaList<Loc<Expr>>> ")" => ExprKind::New(Ty::Named(ty), args).expr(),
+    <obj:Loc<Call>> "." <field:ident> => ExprKind::Field(Box::new(obj), field).expr(),
+    <a:Loc<Atom>> => a,
 };
 
 Atom: Expr = {
@@ -113,7 +118,7 @@ Atom: Expr = {
     "true" => ExprKind::Literal(Literal::Bool(true)).expr(),
     "false" => ExprKind::Literal(Literal::Bool(false)).expr(),
     "null" => ExprKind::Literal(Literal::Null).expr(),
-    "(" <e:Expr> ")" => e,
+    "(" <e:Loc<Expr>> ")" => e,
 };
 
 CmpOp: BinOp = {
@@ -149,8 +154,22 @@ BinOpL<T, O>: Expr = {
     <e:T> => e,
 }
 
+LocIdent: (String, SourceLoc) = {
+    <start:@L> <name:ident> <end:@R> => (name, (start, end).into()),
+}
+
+// locate statement
+LocS<T>: Stmt = {
+    <start:@L> <s:T> <end:@R> => Stmt::located(s, (start, end)),
+}
+
+// locate expression
+Loc<T>: Expr = {
+    <start:@L> <e:T> <end:@R> => e.located((start, end)),
+}
+
 extern {
-    type Location = usize;
+    type Location = LexerLoc;
     type Error = LexerError;
 
     enum Token {
